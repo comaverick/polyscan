@@ -296,7 +296,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
   const resumeCamera = useCallback(() => {
     const video = videoRef.current;
-    if (!video || !video.paused) return;
+    if (!video || (!video.paused && video.readyState >= 2)) return;
     try {
       const playAttempt = video.play();
       if (playAttempt?.catch) playAttempt.catch(() => {});
@@ -309,8 +309,15 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     const video = videoRef.current;
     if (!video || !cameraStream) return undefined;
     video.srcObject = cameraStream;
+    const resumeWhenReady = () => resumeCamera();
+    video.addEventListener('loadedmetadata', resumeWhenReady);
+    video.addEventListener('canplay', resumeWhenReady);
+    video.addEventListener('playing', resumeWhenReady);
     resumeCamera();
     return () => {
+      video.removeEventListener('loadedmetadata', resumeWhenReady);
+      video.removeEventListener('canplay', resumeWhenReady);
+      video.removeEventListener('playing', resumeWhenReady);
       video.pause();
       if (video.srcObject === cameraStream) video.srcObject = null;
     };
@@ -337,7 +344,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     const captureFrame = () => {
       const video = videoRef.current;
       const canvas = analysisCanvasRef.current;
-      if (!video || !canvas || video.readyState < 2 || !video.videoWidth) return;
+      if (!video || !canvas) return;
+      if (video.readyState < 2 || !video.videoWidth) {
+        resumeCamera();
+        return;
+      }
       const context = canvas.getContext('2d', { willReadFrequently: true });
       if (!context) return;
 
@@ -405,7 +416,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
     const timer = window.setInterval(captureFrame, CAPTURE_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [onScanStateChange, paused]);
+  }, [onScanStateChange, paused, resumeCamera]);
 
   const keyframeCount = scanState.cameraKeyframes.length;
   const stableTrackCount = scanState.featureTracks.filter((track) => track.observations.length >= 2).length;
@@ -446,7 +457,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
   return (
     <main className="scan-screen" onPointerDown={resumeCamera}>
-      <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} aria-label="Live room camera" />
+      <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
       <CameraPlaceholder />
       <CoverageCanvas
         cells={scanState.directionalCoverage}
