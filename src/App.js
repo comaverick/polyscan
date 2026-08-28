@@ -13,6 +13,7 @@ import {
   extractFrameFeatures,
   updateFeatureTracks,
 } from './scanner/featureTracking';
+import { buildCaptureMesh } from './scanner/captureMesh';
 import {
   createCaptureManifest,
   getReconstructionJob,
@@ -84,6 +85,114 @@ function CameraPlaceholder() {
       <div className="placeholder-light" />
     </div>
   );
+}
+
+function CaptureMeshCanvas({ patches, mappingReady, parallax = 0 }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const context = canvas.getContext('2d');
+    if (!context) return undefined;
+
+    const draw = () => {
+      const rect = canvas.getBoundingClientRect();
+      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+      const width = Math.max(1, rect.width);
+      const height = Math.max(1, rect.height);
+      const renderWidth = Math.round(width * pixelRatio);
+      const renderHeight = Math.round(height * pixelRatio);
+      if (canvas.width !== renderWidth || canvas.height !== renderHeight) {
+        canvas.width = renderWidth;
+        canvas.height = renderHeight;
+      }
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, width, height);
+
+      context.fillStyle = mappingReady ? 'rgba(24, 81, 210, .5)' : 'rgba(24, 81, 210, .62)';
+      context.fillRect(0, 0, width, height);
+      if (!patches.length) return;
+
+      const traceTriangle = (vertices, offset = { x: 0, y: 0 }) => {
+        context.beginPath();
+        vertices.forEach((vertex, index) => {
+          const x = vertex.x * width + offset.x;
+          const y = vertex.y * height + offset.y;
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.closePath();
+      };
+
+      context.save();
+      context.globalCompositeOperation = 'destination-out';
+      patches.forEach((patch) => {
+        traceTriangle(patch.vertices);
+        context.fillStyle = `rgba(0, 0, 0, ${0.72 + patch.confidence * 0.25})`;
+        context.shadowColor = 'rgba(0, 0, 0, .72)';
+        context.shadowBlur = 7;
+        context.fill();
+      });
+      context.restore();
+
+      const parallaxDepth = Math.max(1.5, Math.min(7, parallax * width * 0.55));
+      context.lineJoin = 'round';
+      context.lineCap = 'round';
+      patches.forEach((patch) => {
+        const radialX = patch.centroid.x - 0.5;
+        const radialY = patch.centroid.y - 0.5;
+        const depthOffset = {
+          x: radialX * parallaxDepth * (0.8 + patch.centroid.depth),
+          y: radialY * parallaxDepth * 0.55 * (0.8 + patch.centroid.depth),
+        };
+        const depthAlpha = 0.08 + patch.centroid.depth * 0.12;
+
+        traceTriangle(patch.vertices, depthOffset);
+        context.fillStyle = `rgba(47, 143, 222, ${depthAlpha})`;
+        context.fill();
+        context.strokeStyle = `rgba(119, 220, 255, ${0.16 + patch.confidence * 0.24})`;
+        context.lineWidth = 0.65;
+        context.stroke();
+
+        patch.vertices.forEach((vertex) => {
+          context.beginPath();
+          context.moveTo(vertex.x * width, vertex.y * height);
+          context.lineTo(vertex.x * width + depthOffset.x, vertex.y * height + depthOffset.y);
+          context.strokeStyle = `rgba(102, 205, 251, ${0.1 + vertex.depth * 0.16})`;
+          context.lineWidth = 0.55;
+          context.stroke();
+        });
+
+        traceTriangle(patch.vertices);
+        context.fillStyle = `rgba(114, 210, 248, ${0.025 + patch.confidence * 0.045})`;
+        context.fill();
+        context.strokeStyle = `rgba(226, 250, 255, ${0.26 + patch.confidence * 0.46})`;
+        context.lineWidth = 0.72;
+        context.stroke();
+
+        patch.vertices.forEach((vertex) => {
+          context.beginPath();
+          context.moveTo(patch.centroid.x * width, patch.centroid.y * height);
+          context.lineTo(vertex.x * width, vertex.y * height);
+          context.strokeStyle = `rgba(194, 239, 255, ${0.07 + vertex.depth * 0.11})`;
+          context.lineWidth = 0.45;
+          context.stroke();
+        });
+      });
+    };
+
+    draw();
+    const resizeObserver = window.ResizeObserver ? new ResizeObserver(draw) : null;
+    resizeObserver?.observe(canvas);
+    window.addEventListener('resize', draw);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', draw);
+    };
+  }, [mappingReady, parallax, patches]);
+
+  return <canvas ref={canvasRef} className="capture-mesh-canvas" data-mesh-patches={patches.length} aria-hidden="true" />;
 }
 
 function Icon({ name, size = 18 }) {
@@ -457,6 +566,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     meaningfulCameraMotion: scanState.meaningfulCameraMotion,
   });
   const mappingReady = keyframeCount > 0;
+  const captureMesh = buildCaptureMesh(scanState.stableFeatures);
   const instruction = paused
     ? 'Paused'
     : trackingState === 'lost'
@@ -493,7 +603,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <section className="scan-preview-frame" aria-label="Room camera preview">
         <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
         <CameraPlaceholder />
-        <div className={`capture-guidance-layer${mappingReady ? ' is-ready' : ''}`} aria-hidden="true" />
+        <CaptureMeshCanvas patches={captureMesh} mappingReady={mappingReady} parallax={scanState.lastEvidence?.parallax || 0} />
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
         <div className="camera-corners" aria-hidden="true">
           <span className="corner corner-top-left" />
@@ -529,7 +639,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{mappingReady ? `${scanState.distinctViewpoints} useful viewpoints` : 'Collecting camera motion'}</span>
+        <span className="scan-frame-count">{captureMesh.length ? `${captureMesh.length} wrapped polygons` : mappingReady ? 'Finding surface detail' : 'Blue = unscanned'}</span>
       </div>
 
       <div className="scan-bottom-ui scan-reference-bottom">

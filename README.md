@@ -73,7 +73,7 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/t
 
 The scanner is designed as a web-first capture flow. The phone records a supported camera stream and keeps lightweight local coverage guidance. If camera access is unavailable, the launch screen accepts a recorded video from the phone instead.
 
-The live camera is capture guidance, not a 3D scanner. It records overlapping viewpoints and camera video; it does not tint individual physical surfaces or create geometry in the browser.
+The live camera is capture guidance, not reconstructed geometry. It records overlapping viewpoints and camera video. A blue screen-space mask marks areas that still need detail, while short edge-aware polygons reveal tracked image regions and provide a wrapped 3D-style capture effect.
 
 Without a reconstruction service configured, the app keeps the capture on the phone and disables the 3D build action. It never substitutes a synthetic room, screen-space polygons, or an unmeasured local model.
 

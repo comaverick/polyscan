@@ -3,6 +3,7 @@ import App, { RoomViewerScreen } from './App';
 
 beforeEach(() => {
   window.history.replaceState({}, '', '/?mobilePreview=1');
+  HTMLCanvasElement.prototype.getContext = jest.fn(() => null);
 });
 
 afterEach(() => {
@@ -16,12 +17,12 @@ test('starts with a scan action and no progress UI', () => {
   expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
 });
 
-test('opens an honest camera capture surface without a fake mesh overlay', () => {
+test('opens the camera with blue unscanned tint and a local capture mesh surface', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
   expect(screen.getByRole('button', { name: /done scanning, waiting/i })).toBeDisabled();
   expect(screen.getByText('Move slowly around the room')).toBeInTheDocument();
-  expect(document.querySelector('.capture-guidance-layer')).toBeInTheDocument();
+  expect(document.querySelector('.capture-mesh-canvas')).toHaveAttribute('data-mesh-patches', '0');
   expect(document.querySelector('.coverage-canvas')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Directional room coverage map')).not.toBeInTheDocument();
 });

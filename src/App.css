@@ -310,11 +310,14 @@ button { font: inherit; }
 .placeholder-light { top: 7%; left: 36%; width: 28%; height: 2px; background: rgba(225, 244, 255, 0.64); box-shadow: 0 0 36px 12px rgba(146, 211, 255, 0.2); }
 
 .coverage-canvas { z-index: -2; pointer-events: none; }
-.capture-guidance-layer {
+.capture-guidance-layer,
+.capture-mesh-canvas {
   position: absolute;
   inset: 0;
   z-index: 1;
   pointer-events: none;
+}
+.capture-guidance-layer {
   background:
     linear-gradient(90deg, rgba(44, 126, 255, .15), transparent 15%, transparent 85%, rgba(44, 126, 255, .15)),
     linear-gradient(180deg, rgba(44, 126, 255, .12), transparent 18%, transparent 82%, rgba(44, 126, 255, .12));
@@ -431,7 +434,8 @@ button { font: inherit; }
 .scan-preview-frame .camera-video,
 .scan-preview-frame .camera-placeholder,
 .scan-preview-frame .coverage-canvas,
-.scan-preview-frame .capture-guidance-layer {
+.scan-preview-frame .capture-guidance-layer,
+.scan-preview-frame .capture-mesh-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -440,7 +444,8 @@ button { font: inherit; }
 
 .scan-preview-frame .camera-video { z-index: 0; background: transparent; }
 .scan-preview-frame .camera-placeholder { z-index: -1; }
-.scan-preview-frame .coverage-canvas { z-index: 1; }
+.scan-preview-frame .coverage-canvas,
+.scan-preview-frame .capture-mesh-canvas { z-index: 1; }
 .scan-screen::after { z-index: 2; background: linear-gradient(180deg, rgba(0, 0, 0, .46), transparent 22%, transparent 67%, rgba(0, 0, 0, .86)); }
 
 .scan-reference-top {
