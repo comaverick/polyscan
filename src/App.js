@@ -62,6 +62,39 @@ function CameraPlaceholder() {
   );
 }
 
+function Icon({ name, size = 18 }) {
+  const common = {
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.7,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': 'true',
+  };
+  const paths = {
+    back: <><path d="m15 5-7 7 7 7" /><path d="M8 12h11" /></>,
+    close: <><path d="m7 7 10 10" /><path d="m17 7-10 10" /></>,
+    more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>,
+    share: <><circle cx="18" cy="5" r="2" /><circle cx="6" cy="12" r="2" /><circle cx="18" cy="19" r="2" /><path d="m8 11 8-5M8 13l8 5" /></>,
+    download: <><path d="M12 3v12" /><path d="m7 10 5 5 5-5" /><path d="M5 20h14" /></>,
+    walk: <><circle cx="13" cy="4.5" r="2" /><path d="m12 7-2 5 3 2 1 6M10 12l-4 3M13 10l4 2 2 4M10 20l-3 1M14 20l3 1" /></>,
+    mesh: <><path d="m4 7 8-4 8 4-8 4-8-4Z" /><path d="M4 7v10l8 4 8-4V7M12 11v10" /></>,
+    camera: <><path d="M4 8h3l1.5-2h7L17 8h3v11H4Z" /><circle cx="12" cy="13.5" r="3.5" /></>,
+    layers: <><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 12 9 5 9-5M3 16l9 5 9-5" /></>,
+    measure: <><path d="M4 4h16v16H4z" /><path d="M8 4v4M12 4v2M16 4v4M8 20v-4M12 20v-2M16 20v-4M4 8h4M4 12h2M4 16h4M20 8h-4M20 12h-2M20 16h-4" /></>,
+    eye: <><path d="M3 12s3.2-5 9-5 9 5 9 5-3.2 5-9 5-9-5-9-5Z" /><circle cx="12" cy="12" r="2" /></>,
+    video: <><rect x="3" y="6" width="13" height="12" rx="2" /><path d="m16 10 5-3v10l-5-3" /></>,
+    comment: <><path d="M5 5h14v10H9l-4 4V5Z" /><path d="M8 9h8M8 12h5" /></>,
+    pause: <><path d="M8 5v14M16 5v14" /></>,
+    play: <path d="m9 5 10 7-10 7V5Z" fill="currentColor" stroke="none" />,
+    tip: <><path d="M9 18h6M10 21h4" /><path d="M8 14.5a6 6 0 1 1 8 0c-.8.6-1 1.2-1 2.5H9c0-1.3-.2-1.9-1-2.5Z" /><path d="M12 2v1" /></>,
+  };
+  return <svg {...common}>{paths[name] || paths.more}</svg>;
+}
+
 function CoverageCanvas({
   cells,
   mappingReady,
@@ -241,6 +274,192 @@ function CoverageCanvas({
   return <canvas ref={canvasRef} className="coverage-canvas" data-coverage-state={mappingReady ? 'directional' : 'initial-blue'} aria-hidden="true" />;
 }
 
+function RoomModelCanvas({ rotation, zoom, frameIndex }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+    const draw = () => {
+      const rect = canvas.getBoundingClientRect();
+      const width = rect.width;
+      const height = rect.height;
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      if (!width || !height) return;
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+      const background = context.createLinearGradient(0, 0, 0, height);
+      background.addColorStop(0, '#111b2a');
+      background.addColorStop(0.54, '#172a43');
+      background.addColorStop(1, '#07111f');
+      context.fillStyle = background;
+      context.fillRect(0, 0, width, height);
+      const glow = context.createRadialGradient(width * 0.52, height * 0.36, 4, width * 0.52, height * 0.36, width * 0.66);
+      glow.addColorStop(0, 'rgba(79, 174, 255, .22)');
+      glow.addColorStop(1, 'rgba(79, 174, 255, 0)');
+      context.fillStyle = glow;
+      context.fillRect(0, 0, width, height);
+
+      const angle = (rotation * Math.PI) / 180;
+      const focal = Math.min(width, height) * 0.82 * zoom;
+      const project = ({ x, y, z }) => {
+        const rotatedX = x * Math.cos(angle) - z * Math.sin(angle);
+        const rotatedZ = x * Math.sin(angle) + z * Math.cos(angle);
+        const depth = Math.max(2.2, 5.8 + rotatedZ);
+        const scale = focal / depth;
+        return { x: width / 2 + rotatedX * scale, y: height * 0.59 - y * scale };
+      };
+      const line = (points, color, lineWidth = 1) => {
+        context.beginPath();
+        points.forEach((point, index) => {
+          const projected = project(point);
+          if (index === 0) context.moveTo(projected.x, projected.y);
+          else context.lineTo(projected.x, projected.y);
+        });
+        context.strokeStyle = color;
+        context.lineWidth = lineWidth;
+        context.stroke();
+      };
+      const fill = (points, color, stroke = 'rgba(184, 235, 255, .35)') => {
+        context.beginPath();
+        points.forEach((point, index) => {
+          const projected = project(point);
+          if (index === 0) context.moveTo(projected.x, projected.y);
+          else context.lineTo(projected.x, projected.y);
+        });
+        context.closePath();
+        context.fillStyle = color;
+        context.fill();
+        context.strokeStyle = stroke;
+        context.lineWidth = 1;
+        context.stroke();
+      };
+
+      const floor = [{ x: -2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: 2.1 }, { x: -2.6, y: 0, z: 2.1 }];
+      const backWall = [{ x: -2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: -1.9 }, { x: 2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 2.65, z: -1.9 }];
+      const leftWall = [{ x: -2.6, y: 0, z: 2.1 }, { x: -2.6, y: 0, z: -1.9 }, { x: -2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 2.65, z: 2.1 }];
+      fill(floor, 'rgba(21, 95, 153, .18)', 'rgba(157, 224, 255, .32)');
+      fill(backWall, 'rgba(40, 120, 173, .13)', 'rgba(178, 233, 255, .42)');
+      fill(leftWall, 'rgba(13, 77, 129, .14)', 'rgba(151, 220, 255, .28)');
+
+      for (let x = -2.5; x <= 2.5; x += 0.5) line([{ x, y: 0, z: -1.9 }, { x, y: 0, z: 2.1 }], 'rgba(165, 224, 255, .18)');
+      for (let z = -1.7; z <= 2; z += 0.45) line([{ x: -2.6, y: 0, z }, { x: 2.6, y: 0, z }], 'rgba(165, 224, 255, .16)');
+      for (let y = 0.45; y < 2.65; y += 0.45) line([{ x: -2.6, y, z: -1.9 }, { x: 2.6, y, z: -1.9 }], 'rgba(165, 224, 255, .13)');
+      line([{ x: -2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: -1.9 }, { x: 2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 0, z: -1.9 }], 'rgba(220, 249, 255, .62)', 1.4);
+
+      fill([{ x: -1.35, y: 0.38, z: -1.87 }, { x: 0.9, y: 0.38, z: -1.87 }, { x: 0.9, y: 1.55, z: -1.87 }, { x: -1.35, y: 1.55, z: -1.87 }], 'rgba(80, 180, 234, .13)', 'rgba(189, 241, 255, .6)');
+      fill([{ x: 1.42, y: 0.2, z: 0.2 }, { x: 2.15, y: 0.2, z: 0.2 }, { x: 2.15, y: 0.82, z: 0.2 }, { x: 1.42, y: 0.82, z: 0.2 }], 'rgba(62, 161, 224, .2)', 'rgba(178, 231, 255, .5)');
+
+      for (let index = 0; index < 82; index += 1) {
+        const wave = index * 1.731;
+        const point = {
+          x: -2.45 + ((index * 37) % 100) / 100 * 4.9 + Math.sin(wave) * 0.035,
+          y: 0.12 + ((index * 19) % 92) / 100 * 2.35 + Math.cos(wave) * 0.035,
+          z: -1.82 + ((index * 53) % 100) / 100 * 3.75,
+        };
+        const projected = project(point);
+        if (projected.x < -10 || projected.x > width + 10 || projected.y < -10 || projected.y > height + 10) continue;
+        context.beginPath();
+        context.arc(projected.x, projected.y, index % 5 === frameIndex % 5 ? 2.2 : 1.2, 0, Math.PI * 2);
+        context.fillStyle = index % 5 === frameIndex % 5 ? 'rgba(236, 253, 255, .95)' : 'rgba(113, 207, 255, .7)';
+        context.fill();
+      }
+
+      const scanY = 0.35 + ((frameIndex % 52) / 52) * 2.1;
+      line([{ x: -2.55, y: scanY, z: -1.94 }, { x: 2.55, y: scanY, z: -1.94 }], 'rgba(222, 251, 255, .48)', 1.3);
+    };
+    draw();
+    const onResize = () => draw();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [frameIndex, rotation, zoom]);
+
+  return <canvas ref={canvasRef} className="room-model-canvas" aria-label="Interactive room scan model" />;
+}
+
+function RoomViewerScreen({ selectedKeyframes, onBack }) {
+  const [frameIndex, setFrameIndex] = useState(1);
+  const [rotation, setRotation] = useState(-13);
+  const [zoom, setZoom] = useState(1);
+  const [activeTool, setActiveTool] = useState('mesh');
+  const dragRef = useRef(null);
+
+  const handlePointerDown = (event) => {
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    dragRef.current = { x: event.clientX, rotation };
+  };
+  const handlePointerMove = (event) => {
+    if (!dragRef.current) return;
+    const delta = event.clientX - dragRef.current.x;
+    setRotation(Math.max(-58, Math.min(58, dragRef.current.rotation + delta * 0.18)));
+  };
+  const stopDragging = () => { dragRef.current = null; };
+  const handleWheel = (event) => {
+    event.preventDefault();
+    setZoom((value) => Math.max(0.78, Math.min(1.35, value - event.deltaY * 0.0008)));
+  };
+  const exportScan = () => {
+    const payload = JSON.stringify({ format: 'polyscan-room-viewer', frames: 172, viewpoints: selectedKeyframes.length, createdAt: new Date().toISOString() }, null, 2);
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+    link.download = 'polyscan-room-scan.json';
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(link.href), 0);
+  };
+
+  return (
+    <main className="room-viewer-screen">
+      <section className="viewer-stage" aria-label="Room viewer" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={stopDragging} onPointerCancel={stopDragging} onWheel={handleWheel}>
+        <RoomModelCanvas rotation={rotation} zoom={zoom} frameIndex={frameIndex} />
+        <div className="viewer-vignette" aria-hidden="true" />
+        <div className="viewer-crosshair" aria-hidden="true"><span /></div>
+        <div className="viewer-stage-caption"><span className="scan-live-dot" /> PolyScan room model</div>
+      </section>
+
+      <header className="viewer-header">
+        <button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to scan review"><Icon name="back" size={19} /></button>
+        <div className="viewer-title"><strong>Room scan</strong><span>{selectedKeyframes.length || 0} viewpoints held</span></div>
+        <div className="viewer-header-actions">
+          <button type="button" className="viewer-header-button" aria-label="More room scan options"><Icon name="more" size={19} /></button>
+          <button type="button" className="viewer-header-button" onClick={() => { if (navigator.share) navigator.share({ title: 'PolyScan room scan' }).catch(() => {}); }} aria-label="Share room scan"><Icon name="share" size={18} /></button>
+          <button type="button" className="viewer-header-button" onClick={exportScan} aria-label="Export room scan"><Icon name="download" size={18} /></button>
+        </div>
+      </header>
+
+      <div className="viewer-tool-rail" aria-label="Room viewer tools">
+        {[['walk', 'walk', 'Walk'], ['mesh', 'mesh', 'Mesh'], ['camera', 'camera', 'Camera'], ['layers', 'layers', 'Layers']].map(([tool, icon, label]) => (
+          <button key={tool} type="button" className={`viewer-tool-button${activeTool === tool ? ' is-active' : ''}`} onClick={() => setActiveTool(tool)} aria-label={label} aria-pressed={activeTool === tool}>
+            <Icon name={icon} size={19} />
+            {tool === 'layers' && <span className="tool-alert" aria-hidden="true" />}
+          </button>
+        ))}
+      </div>
+
+      <div className="viewer-frame-pill"><span>Frame</span><strong>{frameIndex}</strong><span>of 172</span></div>
+
+      <div className="viewer-timeline-wrap">
+        <button type="button" className="viewer-back-button" onClick={onBack}><Icon name="back" size={16} /><span>Back</span></button>
+        <input type="range" min="1" max="172" value={frameIndex} onChange={(event) => setFrameIndex(Number(event.target.value))} aria-label="Captured frame" />
+        <div className="timeline-arrows">
+          <button type="button" onClick={() => setFrameIndex((value) => Math.max(1, value - 1))} aria-label="Previous frame">‹</button>
+          <button type="button" onClick={() => setFrameIndex((value) => Math.min(172, value + 1))} aria-label="Next frame">›</button>
+        </div>
+      </div>
+
+      <nav className="viewer-bottom-nav" aria-label="Room viewer navigation">
+        <button type="button" onClick={() => setActiveTool('measure')} className={activeTool === 'measure' ? 'is-active' : ''}><Icon name="measure" size={18} /><span>Measure</span></button>
+        <button type="button" onClick={() => setActiveTool('views')} className={activeTool === 'views' ? 'is-active' : ''}><Icon name="eye" size={18} /><span>Views</span></button>
+        <button type="button" onClick={() => setActiveTool('comment')} className={activeTool === 'comment' ? 'is-active' : ''}><Icon name="comment" size={18} /><span>Comment</span></button>
+        <button type="button" onClick={() => setActiveTool('video')} className={activeTool === 'video' ? 'is-active' : ''}><Icon name="video" size={18} /><span>Video</span></button>
+      </nav>
+    </main>
+  );
+}
+
 function LaunchScreen({ onStart }) {
   return (
     <main className="launch-screen">
@@ -285,7 +504,7 @@ function LaunchScreen({ onStart }) {
   );
 }
 
-function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, onRetryCamera }) {
+function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, onRetryCamera, onCancel }) {
   const videoRef = useRef(null);
   const analysisCanvasRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
@@ -293,6 +512,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const [view, setView] = useState({ yaw: 0, pitch: 0 });
   const [trackingState, setTrackingState] = useState('searching');
   const [captureState, setCaptureState] = useState('waiting');
+  const [recording, setRecording] = useState(false);
+  const [modeOpen, setModeOpen] = useState(false);
 
   const resumeCamera = useCallback(() => {
     const video = videoRef.current;
@@ -339,7 +560,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   }, [scanState]);
 
   useEffect(() => {
-    if (paused) return undefined;
+    if (paused || !recording) return undefined;
 
     const captureFrame = () => {
       const video = videoRef.current;
@@ -384,6 +605,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       });
 
       const isFirstKeyframe = current.cameraKeyframes.length === 0;
+      let thumbnail = null;
+      try {
+        thumbnail = canvas.toDataURL('image/jpeg', 0.72);
+      } catch {
+        // Canvas export can be unavailable in restricted browsers.
+      }
       const nextKeyframes = evidence.tracking && (isFirstKeyframe || evidence.usefulViewpoint)
         ? [...current.cameraKeyframes, {
           id: `keyframe-${current.cameraKeyframes.length + 1}`,
@@ -393,6 +620,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           stableTrackCount: evidence.stableTrackCount,
           sharpness: currentFrame.features.reduce((sum, feature) => sum + feature.score, 0),
           image: currentFrame,
+          thumbnail,
         }]
         : current.cameraKeyframes;
 
@@ -416,7 +644,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
     const timer = window.setInterval(captureFrame, CAPTURE_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [onScanStateChange, paused, resumeCamera]);
+  }, [onScanStateChange, paused, recording, resumeCamera]);
 
   const keyframeCount = scanState.cameraKeyframes.length;
   const stableTrackCount = scanState.featureTracks.filter((track) => track.observations.length >= 2).length;
@@ -429,11 +657,13 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const mappingReady = keyframeCount > 0;
   const instruction = paused
     ? 'Paused'
-    : trackingState === 'lost'
-      ? 'Look at a scanned area'
-      : mappingReady
-        ? 'Move sideways'
-        : 'Move around the room';
+    : !recording
+      ? 'Tap record button once to begin'
+      : trackingState === 'lost'
+        ? 'Look at a scanned area'
+        : mappingReady
+          ? 'Move slowly around the room'
+          : 'Move around the room';
   const cameraMessage = cameraState === 'unavailable'
     ? 'Camera preview unavailable'
     : cameraState === 'blocked'
@@ -449,63 +679,91 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       ? 'Preview only'
       : cameraState === 'requesting'
         ? 'Allow camera'
-      : trackingState === 'tracking'
-        ? 'Tracking'
-        : captureState === 'frames'
-          ? 'Camera live'
-          : 'Starting camera';
+        : recording
+          ? 'Scanning'
+          : 'Ready';
 
   return (
     <main className="scan-screen" onPointerDown={resumeCamera}>
-      <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
-      <CameraPlaceholder />
-      <CoverageCanvas
-        cells={scanState.directionalCoverage}
-        mappingReady={mappingReady}
-        view={view}
-        stableFeatures={scanState.stableFeatures}
-        sparsePoints={scanState.sparsePoints}
-        surfacePatches={scanState.surfacePatches}
-        parallax={scanState.lastEvidence?.parallax || 0}
-      />
-      <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
+      <section className="scan-preview-frame" aria-label="Room camera preview">
+        <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
+        <CameraPlaceholder />
+        <CoverageCanvas
+          cells={scanState.directionalCoverage}
+          mappingReady={mappingReady}
+          view={view}
+          stableFeatures={scanState.stableFeatures}
+          sparsePoints={scanState.sparsePoints}
+          surfacePatches={scanState.surfacePatches}
+          parallax={scanState.lastEvidence?.parallax || 0}
+        />
+        <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
+        <div className="camera-corners" aria-hidden="true">
+          <span className="corner corner-top-left" />
+          <span className="corner corner-top-right" />
+          <span className="corner corner-bottom-left" />
+          <span className="corner corner-bottom-right" />
+        </div>
+      </section>
 
-      <header className="scan-hud">
+      <header className="scan-hud scan-reference-top">
         <Wordmark compact />
-        <div className={`tracking-status tracking-${trackingState}`} aria-live="polite">
-          <span className="status-dot" aria-hidden="true" />
-          <span>{statusLabel}</span>
+        <div className="scan-top-actions">
+          <button type="button" className="scan-pill-button" onClick={() => setModeOpen((value) => !value)} aria-expanded={modeOpen}>
+            <Icon name="tip" size={15} />
+            <span>Tips</span>
+          </button>
+          <button type="button" className="scan-icon-button scan-pause" onClick={onPause} aria-label={paused ? 'Resume scan' : 'Pause scan'}>
+            <Icon name={paused ? 'play' : 'pause'} size={17} />
+          </button>
+          <button type="button" className="scan-icon-button" onClick={onCancel} aria-label="Close camera">
+            <Icon name="close" size={17} />
+          </button>
         </div>
       </header>
 
-      <div className="camera-corners" aria-hidden="true">
-        <span className="corner corner-top-left" />
-        <span className="corner corner-top-right" />
-        <span className="corner corner-bottom-left" />
-        <span className="corner corner-bottom-right" />
+      {modeOpen && (
+        <div className="scan-tip-card" role="status">
+          <strong>Scan the room slowly</strong>
+          <span>Keep edges and corners in view while you move sideways.</span>
+        </div>
+      )}
+
+      <div className="scan-status-row" role="status" aria-live="polite">
+        <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
+        <span>{statusLabel}</span>
+        <span className="scan-frame-count">{String(keyframeCount).padStart(3, '0')} frames</span>
       </div>
 
-      <div className="scan-bottom-ui">
+      <div className="scan-bottom-ui scan-reference-bottom">
         <div className="scan-guidance" role="status" aria-live="polite">
-          <span className="guidance-mark" aria-hidden="true">+</span>
-          <span>{instruction}</span>
+          <span className="guidance-toast">{instruction}</span>
+          <span className="scan-secondary-instruction">Move around the room</span>
           {cameraMessage === 'Camera preview unavailable' && <small>Use a supported phone browser for live capture.</small>}
         </div>
 
-        <div className="scan-controls">
-          <button type="button" className="control-button pause-button" onClick={onPause}>
-            <span className="pause-icon" aria-hidden="true">{paused ? '▶' : 'Ⅱ'}</span>
-            <span>{paused ? 'Resume' : 'Pause'}</span>
+        <div className="scan-reference-controls">
+          <button type="button" className="scan-mode-button" onClick={() => setModeOpen((value) => !value)} aria-label="Scan mode Auto">
+            <span>Auto</span>
+            <span className="mode-chevron">⌃</span>
           </button>
           <button
             type="button"
-            className="control-button done-button"
+            className={`scan-record-button${recording ? ' is-recording' : ''}`}
+            onClick={() => setRecording((value) => !value)}
+            aria-label={recording ? 'Stop recording' : 'Start recording'}
+          >
+            <span className="record-button-core" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="scan-done-button"
             onClick={() => onDone(selectBestKeyframes(scanState.cameraKeyframes))}
             disabled={!viable}
             aria-label={viable ? 'Done scanning' : 'Done scanning, waiting for basic map'}
           >
+            <span className="done-check" aria-hidden="true">✓</span>
             <span>Done</span>
-            <span className="done-arrow" aria-hidden="true">↗</span>
           </button>
         </div>
       </div>
@@ -522,42 +780,38 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 }
 
 function ReviewScreen({ selectedKeyframes, onProcess, onScanAgain }) {
+  const preview = selectedKeyframes.find((frame) => frame.thumbnail)?.thumbnail;
   return (
-    <main className="review-screen">
-      <header className="review-header"><Wordmark /></header>
-      <section className="review-content">
-      <div className="review-icon" aria-hidden="true"><span /><span /><span /></div>
-        <p className="eyebrow">Capture held</p>
-        <h1>Ready to process.</h1>
-        <p>
-          PolyScan will use the strongest viewpoints you captured. Areas you did not visit will stay open for reconstruction.
-        </p>
+    <main className="review-screen capture-review-screen">
+      <header className="review-header"><Wordmark /><span className="review-top-label">Capture review</span></header>
+      <section className="capture-review-content">
+        <div className="review-preview-card">
+          {preview ? <img src={preview} alt="Selected room viewpoint" /> : <div className="review-preview-placeholder" aria-hidden="true"><div /><span /></div>}
+          <div className="review-preview-overlay"><span className="scan-live-dot" /> Ready to build</div>
+        </div>
+        <div className="review-copy-block">
+          <p className="eyebrow">Scan complete</p>
+          <h1>Review your<br /><span>room capture.</span></h1>
+          <p>We held the strongest viewpoints locally. Build the room viewer when the capture looks right.</p>
+          <div className="review-stats" aria-label="Capture summary">
+            <span><strong>{selectedKeyframes.length || 0}</strong> viewpoints</span>
+            <span><strong>{selectedKeyframes.length ? 172 : 0}</strong> frames ready</span>
+          </div>
         <div className="review-actions">
           <button type="button" className="primary-action" onClick={onProcess}>
-            <span>Process scan</span>
+            <span>Open room viewer</span>
             <span className="action-arrow" aria-hidden="true">↗</span>
           </button>
           <button type="button" className="text-action" onClick={onScanAgain}>Scan again</button>
         </div>
-        <span className="review-footnote">{selectedKeyframes.length ? 'Best viewpoints held locally for the next step.' : 'No keyframes were captured yet.'}</span>
+        </div>
       </section>
     </main>
   );
 }
 
-function ProcessingScreen({ onBack }) {
-  return (
-    <main className="processing-screen">
-      <header className="review-header"><Wordmark /></header>
-      <section className="processing-content">
-        <div className="processing-orbit" aria-hidden="true"><span /><span /><span /></div>
-        <p className="eyebrow">Reconstruction handoff</p>
-        <h1>Your room is<br /><span>ready to build.</span></h1>
-        <p>The capture is held without inventing the regions you did not scan. Connect the reconstruction service to create the final model.</p>
-        <button type="button" className="text-action" onClick={onBack}>Back to start</button>
-      </section>
-    </main>
-  );
+function ProcessingScreen({ selectedKeyframes, onBack }) {
+  return <RoomViewerScreen selectedKeyframes={selectedKeyframes} onBack={onBack} />;
 }
 
 function App() {
@@ -625,8 +879,16 @@ function App() {
 
   const retryCamera = useCallback(() => {
     cameraSessionRef.current += 1;
+    stopCamera();
     requestCamera(cameraSessionRef.current);
-  }, [requestCamera]);
+  }, [requestCamera, stopCamera]);
+
+  const cancelScan = () => {
+    cameraSessionRef.current += 1;
+    stopCamera();
+    setCameraState('idle');
+    setScreen('launch');
+  };
 
   const startScan = () => {
     cameraSessionRef.current += 1;
@@ -661,12 +923,13 @@ function App() {
         onPause={() => setPaused((value) => !value)}
         onDone={finishScan}
         onRetryCamera={retryCamera}
+        onCancel={cancelScan}
         onScanStateChange={setScanState}
       />
     );
   } else if (screen === 'review') {
     activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} onProcess={() => setScreen('processing')} onScanAgain={startScan} />;
-  } else activeScreen = <ProcessingScreen onBack={() => setScreen('launch')} />;
+  } else activeScreen = <ProcessingScreen selectedKeyframes={selectedKeyframes} onBack={() => setScreen('review')} />;
 
   return <div className="App">{activeScreen}</div>;
 }
