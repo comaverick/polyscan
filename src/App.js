@@ -3,6 +3,7 @@ import './App.css';
 import {
   DEFAULT_VIEWPOINT_THRESHOLDS,
   createDirectionalCoverage,
+  coverageOpacity,
   getVisibleCellIds,
   isReconstructionViable,
   selectBestKeyframes,
@@ -23,11 +24,6 @@ import {
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
-
-function deterministicNoise(value) {
-  const sample = Math.sin(value * 12.9898) * 43758.5453;
-  return sample - Math.floor(sample);
-}
 
 const createEmptyScanState = () => ({
   directionalCoverage: createDirectionalCoverage(),
@@ -211,74 +207,100 @@ function CoverageCanvas({
       context.restore();
     };
 
-    const drawCoverageTexture = (context, width, height) => {
+    const projectCell = (cell, width, height) => {
       const yawBins = cells[0]?.yawBins || 20;
       const yawSize = 360 / yawBins;
-      const now = performance.now();
+      const cellYaw = cell.yawIndex * yawSize + yawSize / 2;
+      const yawDelta = ((cellYaw - view.yaw + 540) % 360) - 180;
+      const pitchCenter = cell.pitchBand === 0 ? 24 : cell.pitchBand === 1 ? 0 : -24;
+      const inCurrentView = Math.abs(yawDelta) <= 45 && Math.abs(pitchCenter - view.pitch) <= 34;
+      if (!inCurrentView) return null;
+
+      const centerX = width / 2 + (yawDelta / 78) * width;
+      const centerY = height / 2 - ((pitchCenter - view.pitch) / 58) * height;
+      const cellWidth = width * (yawSize / 78) * 1.01;
+      const cellHeight = height / 3.02;
+      if (centerX + cellWidth / 2 < 0 || centerX - cellWidth / 2 > width || centerY + cellHeight / 2 < 0 || centerY - cellHeight / 2 > height) return null;
+      return {
+        left: centerX - cellWidth / 2,
+        top: centerY - cellHeight / 2,
+        right: centerX + cellWidth / 2,
+        bottom: centerY + cellHeight / 2,
+        width: cellWidth,
+        height: cellHeight,
+      };
+    };
+
+    const drawCoverageRegions = (context, width, height) => {
       context.save();
-      context.globalCompositeOperation = 'screen';
-      cells.forEach((cell, cellIndex) => {
+      if (!mappingReady) {
+        context.fillStyle = 'rgba(25, 151, 235, .42)';
+        context.fillRect(0, 0, width, height);
+      }
+
+      cells.forEach((cell) => {
+        const projection = projectCell(cell, width, height);
+        if (!projection) return;
         const coverage = displayedRef.current.get(cell.id) ?? cell.coverage;
-        const cellYaw = cell.yawIndex * yawSize + yawSize / 2;
-        const yawDelta = ((cellYaw - view.yaw + 540) % 360) - 180;
-        const pitchCenter = cell.pitchBand === 0 ? 24 : cell.pitchBand === 1 ? 0 : -24;
-        const inCurrentView = Math.abs(yawDelta) <= 45 && Math.abs(pitchCenter - view.pitch) <= 34;
-        if (!inCurrentView) return;
-
-        const centerX = width / 2 + (yawDelta / 78) * width;
-        const centerY = height / 2 - ((pitchCenter - view.pitch) / 58) * height;
-        const cellWidth = width * (yawSize / 78) * 1.01;
-        const cellHeight = height / 3.02;
-        if (centerX + cellWidth / 2 < 0 || centerX - cellWidth / 2 > width || centerY + cellHeight / 2 < 0 || centerY - cellHeight / 2 > height) return;
-
-        const isUnscanned = coverage < 0.2;
-        const unknownAmount = Math.max(0, Math.min(1, 1 - coverage / 0.2));
-        const textureAmount = Math.max(0.25, Math.min(1, coverage));
-        const pixelCount = isUnscanned ? Math.round(18 + unknownAmount * 24) : Math.round(14 + textureAmount * 24);
-        const texturePoints = [];
-        for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
-          const seed = cellIndex * 101 + pixelIndex * 17;
-          const depth = deterministicNoise(seed + 4);
-          const depthScale = isUnscanned ? 1 : 0.72 + depth * 0.28;
-          const x = centerX + (deterministicNoise(seed + 1) - 0.5) * cellWidth * depthScale;
-          const y = centerY + (deterministicNoise(seed + 2) - 0.5) * cellHeight * depthScale;
-          const flicker = 0.78 + Math.sin(now / 260 + seed) * 0.22;
-          if (isUnscanned) {
-            const size = pixelIndex % 6 === 0 ? 2 : 1;
-            const blueOpacity = (0.16 + unknownAmount * 0.5) * flicker;
-            context.fillStyle = `rgba(44, 169, 255, ${blueOpacity})`;
-            context.fillRect(Math.round(x), Math.round(y), size, size);
-          } else {
-            texturePoints.push({ x, y, depth });
-          }
-        }
-
-        if (!isUnscanned && texturePoints.length) {
+        const opacity = coverageOpacity(coverage);
+        if (opacity <= 0) return;
+        context.fillStyle = `rgba(28, 157, 237, ${opacity})`;
+        context.fillRect(projection.left, projection.top, projection.width, projection.height);
+        if (coverage < 0.9) {
+          context.strokeStyle = `rgba(152, 231, 255, ${Math.max(.12, opacity * .72)})`;
           context.lineWidth = 0.7;
-          for (let pointIndex = 1; pointIndex < texturePoints.length; pointIndex += 2) {
-            const point = texturePoints[pointIndex];
-            let closest = null;
-            let closestDistance = Infinity;
-            texturePoints.slice(0, pointIndex).forEach((candidate) => {
-              const distance = Math.hypot(candidate.x - point.x, candidate.y - point.y);
-              if (distance < closestDistance) {
-                closest = candidate;
-                closestDistance = distance;
-              }
-            });
-            if (!closest || closestDistance > Math.max(cellWidth, cellHeight) * 0.38) continue;
-            context.strokeStyle = `rgba(186, 237, 255, ${0.1 + textureAmount * 0.2})`;
-            context.beginPath();
-            context.moveTo(closest.x, closest.y);
-            context.lineTo(point.x, point.y);
-            context.stroke();
-          }
-          texturePoints.forEach((point, pointIndex) => {
-            const size = pointIndex % 7 === 0 ? 2 : 1;
-            context.fillStyle = `rgba(213, 249, 255, ${(0.24 + textureAmount * 0.45) * (0.7 + point.depth * 0.3)})`;
-            context.fillRect(Math.round(point.x), Math.round(point.y), size, size);
-          });
+          context.strokeRect(projection.left, projection.top, projection.width, projection.height);
         }
+      });
+      context.restore();
+    };
+
+    const drawMappedWireframe = (context, width, height) => {
+      if (!mappingReady) return;
+      context.save();
+      cells.forEach((cell) => {
+        const coverage = displayedRef.current.get(cell.id) ?? cell.coverage;
+        if (coverage < 0.2) return;
+        const projection = projectCell(cell, width, height);
+        if (!projection) return;
+
+        // This is a confidence-linked directional scaffold, not fabricated room mesh.
+        // It gives the user spatial feedback until real triangulated geometry is available.
+        const insetX = projection.width * 0.1;
+        const insetY = projection.height * 0.12;
+        const depthX = projection.width * 0.08;
+        const depthY = projection.height * 0.09;
+        const front = [
+          { x: projection.left, y: projection.top },
+          { x: projection.right, y: projection.top },
+          { x: projection.right, y: projection.bottom },
+          { x: projection.left, y: projection.bottom },
+        ];
+        const back = front.map((point) => ({
+          x: point.x + (point.x < width / 2 ? insetX : -insetX) + depthX,
+          y: point.y + insetY - depthY,
+        }));
+        const alpha = Math.min(0.72, 0.22 + coverage * 0.62);
+        context.strokeStyle = `rgba(209, 247, 255, ${alpha})`;
+        context.lineWidth = coverage >= 0.66 ? 1.1 : 0.8;
+
+        const drawLoop = (points) => {
+          context.beginPath();
+          points.forEach((point, index) => {
+            if (index === 0) context.moveTo(point.x, point.y);
+            else context.lineTo(point.x, point.y);
+          });
+          context.closePath();
+          context.stroke();
+        };
+        drawLoop(front);
+        drawLoop(back);
+        front.forEach((point, index) => {
+          context.beginPath();
+          context.moveTo(point.x, point.y);
+          context.lineTo(back[index].x, back[index].y);
+          context.stroke();
+        });
       });
       context.restore();
     };
@@ -314,7 +336,8 @@ function CoverageCanvas({
         context.fillRect(0, 0, width, height);
       }
 
-      drawCoverageTexture(context, width, height);
+      drawCoverageRegions(context, width, height);
+      drawMappedWireframe(context, width, height);
       drawTrackedFeatures(context, width, height);
       drawGeometry(context, width, height);
       frameId = window.requestAnimationFrame(draw);
@@ -333,29 +356,26 @@ function CoverageCanvas({
   return <canvas ref={canvasRef} className="coverage-canvas" data-coverage-state={mappingReady ? 'directional' : 'initial-blue'} aria-hidden="true" />;
 }
 
-function CoverageMap({ cells, view, recording, paused, trackingState }) {
+function CoverageMap({ cells, view, paused, trackingState }) {
   const visibleIds = new Set(getVisibleCellIds({ yaw: view.yaw, pitch: view.pitch, yawBins: 20 }));
   const scannedCells = cells.filter((cell) => cell.coverage >= 0.2).length;
-  const percentage = cells.length ? Math.round((scannedCells / cells.length) * 100) : 0;
   const visibleUnscanned = cells.filter((cell) => visibleIds.has(cell.id) && cell.coverage < 0.2).length;
   const hint = paused
     ? 'Scan paused'
     : trackingState === 'lost'
       ? 'Aim at an edge or corner'
-      : !recording
-        ? 'Tap record. Blue pixels mark areas to capture'
-        : !scannedCells
-          ? 'Move slowly. Blue pixels show what is still unscanned'
-          : visibleUnscanned
-            ? `${visibleUnscanned} areas still need capture`
-            : 'Turn toward the blue pixels';
+      : !scannedCells
+        ? 'Move slowly. Blue areas are still unscanned'
+        : visibleUnscanned
+          ? 'Move toward the blue areas'
+          : 'Mapped areas stay in the camera color';
   const pitchLabels = ['Ceiling', 'Walls', 'Floor'];
 
   return (
-    <aside className="coverage-map-card" aria-label={`Room coverage ${percentage} percent, ${scannedCells} of ${cells.length} areas mapped`}>
+    <aside className="coverage-map-card" aria-label="Directional room coverage map">
       <div className="coverage-map-header">
-        <div><span className="coverage-map-kicker">Room coverage</span><strong>{percentage}% scanned</strong></div>
-        <div className="coverage-map-count"><strong>{scannedCells}</strong><span>of {cells.length} areas</span></div>
+        <div><span className="coverage-map-kicker">Room map</span><strong>Blue to scan</strong></div>
+        <div className="coverage-map-live-label">Live</div>
       </div>
       <div className="coverage-map-surfaces">
         {pitchLabels.map((label, pitchBand) => (
@@ -743,7 +763,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const [view, setView] = useState({ yaw: 0, pitch: 0 });
   const [trackingState, setTrackingState] = useState('searching');
   const [captureState, setCaptureState] = useState('waiting');
-  const [recording, setRecording] = useState(false);
+  // Capture starts with the scan surface. Pause is the only capture toggle;
+  // the central control is visual feedback rather than a second workflow.
+  const [recording, setRecording] = useState(true);
   const [modeOpen, setModeOpen] = useState(false);
   const recorderRef = useRef(null);
   const recorderChunksRef = useRef([]);
@@ -883,7 +905,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   }), []);
 
   useEffect(() => {
-    if (paused || !recording) return undefined;
+    if (paused) return undefined;
 
     const captureFrame = () => {
       const video = videoRef.current;
@@ -968,10 +990,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
     const timer = window.setInterval(captureFrame, CAPTURE_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [onScanStateChange, paused, recording, resumeCamera]);
+  }, [onScanStateChange, paused, resumeCamera]);
 
   const keyframeCount = scanState.cameraKeyframes.length;
-  const scannedZoneCount = scanState.directionalCoverage.filter((cell) => cell.coverage >= 0.2).length;
   const stableTrackCount = scanState.featureTracks.filter((track) => track.observations.length >= 2).length;
   const viable = isReconstructionViable({
     keyframes: keyframeCount,
@@ -982,13 +1003,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const mappingReady = keyframeCount > 0;
   const instruction = paused
     ? 'Paused'
-    : !recording
-      ? 'Tap record button once to begin'
-      : trackingState === 'lost'
-        ? 'Look at a scanned area'
-        : mappingReady
-          ? 'Move slowly around the room'
-          : 'Move around the room';
+    : trackingState === 'lost'
+      ? 'Look at a scanned area'
+      : mappingReady
+        ? 'Move slowly around the room'
+        : 'Move around the room';
   const cameraMessage = cameraState === 'unavailable'
     ? 'Camera preview unavailable'
     : cameraState === 'blocked'
@@ -1062,12 +1081,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{scannedZoneCount} zones</span>
+        <span className="scan-frame-count">{mappingReady ? 'Map active' : 'Blue = unscanned'}</span>
       </div>
       <CoverageMap
         cells={scanState.directionalCoverage}
         view={view}
-        recording={recording}
         paused={paused}
         trackingState={trackingState}
       />
@@ -1075,7 +1093,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-bottom-ui scan-reference-bottom">
         <div className="scan-guidance" role="status" aria-live="polite">
           <span className="guidance-toast">{instruction}</span>
-          <span className="scan-secondary-instruction">Move around the room</span>
           {cameraMessage === 'Camera preview unavailable' && <small>Use a supported phone browser for live capture.</small>}
         </div>
 
@@ -1084,14 +1101,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
             <span>Auto</span>
             <span className="mode-chevron">⌃</span>
           </button>
-          <button
-            type="button"
-            className={`scan-record-button${recording ? ' is-recording' : ''}`}
-            onClick={() => setRecording((value) => !value)}
-            aria-label={recording ? 'Stop recording' : 'Start recording'}
-          >
-            <span className="record-button-core" aria-hidden="true" />
-          </button>
+          <div className={`scan-map-control${recording ? ' is-active' : ''}`} aria-label="Live spatial mapping active">
+            <span className="scan-map-control-core" aria-hidden="true"><Icon name="layers" size={21} /></span>
+          </div>
           <button
             type="button"
             className="scan-done-button"
@@ -1181,8 +1193,12 @@ function ProcessingScreen({ selectedKeyframes, capture, buildState, onOpenViewer
           <p className="eyebrow">{buildState.status === 'local' ? 'Browser fallback' : 'Spatial processing'}</p>
           <h1>{title}</h1>
           <p>{description}</p>
-          {isWorking && <div className="build-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={buildState.progress} aria-label="Room build progress"><span style={{ width: `${buildState.progress}%` }} /></div>}
-          {isWorking && <div className="build-progress-label"><span>{buildState.status === 'uploading' ? 'Uploading capture' : 'Reconstructing room'}</span><strong>{buildState.progress}%</strong></div>}
+          {isWorking && (
+            <div className="build-processing-status" role="status" aria-live="polite">
+              <span className="build-processing-dot" aria-hidden="true" />
+              <span>{buildState.status === 'uploading' ? 'Uploading capture' : 'Reconstructing room'}</span>
+            </div>
+          )}
           {buildState.status === 'error' && <button type="button" className="primary-action" onClick={onRetry}><span>Try again</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
           {(buildState.status === 'local' || buildState.status === 'ready') && <button type="button" className="primary-action" onClick={onOpenViewer}><span>{buildState.status === 'local' ? 'Open local preview' : 'Open room viewer'}</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
           {capture?.url && buildState.status === 'local' && <small className="build-note">Your video remains on this device until a reconstruction service is connected.</small>}
