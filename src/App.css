@@ -835,3 +835,35 @@ button { font: inherit; }
 .coverage-map-cell { width: 6px; height: 6px; justify-self: center; align-self: center; border-radius: 50%; }
 .coverage-map-cell.is-current { outline: 1px solid rgba(255, 255, 255, .9); outline-offset: 2px; }
 .coverage-legend-dot.is-unscanned { border-color: rgba(78, 191, 255, .92); background: #37b8ff; box-shadow: 0 0 7px rgba(55, 184, 255, .75); }
+
+.room-model-viewer,
+.room-model-host { position: absolute; inset: 0; overflow: hidden; background: #07111c; }
+.room-model-host { touch-action: none; }
+.room-model-canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.room-model-state { position: absolute; top: 50%; left: 50%; z-index: 4; display: flex; width: min(320px, calc(100vw - 40px)); flex-direction: column; gap: 6px; padding: 18px; border: 1px solid rgba(207, 237, 255, .2); border-radius: 14px; background: rgba(5, 14, 24, .88); color: rgba(224, 242, 252, .7); text-align: center; transform: translate(-50%, -50%); backdrop-filter: blur(18px); }
+.room-model-state strong { color: #f0faff; font-size: 14px; font-weight: 650; }
+.room-model-state span { font-size: 11px; line-height: 1.45; }
+.room-model-error { border-color: rgba(255, 190, 161, .26); }
+.viewer-look-hint { position: absolute; top: max(82px, calc(env(safe-area-inset-top) + 72px)); left: 50%; z-index: 3; padding: 8px 11px; border: 1px solid rgba(213, 242, 255, .16); border-radius: 999px; background: rgba(4, 12, 21, .58); color: rgba(227, 244, 253, .7); font-size: 9px; transform: translateX(-50%); pointer-events: none; backdrop-filter: blur(14px); }
+.viewer-touch-controls { position: absolute; bottom: max(24px, env(safe-area-inset-bottom)); left: 18px; z-index: 5; display: grid; width: 126px; height: 126px; grid-template: repeat(3, 1fr) / repeat(3, 1fr); border: 1px solid rgba(210, 239, 255, .18); border-radius: 50%; background: rgba(4, 12, 21, .5); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08); backdrop-filter: blur(16px); }
+.viewer-touch-controls::after { grid-area: 2 / 2; width: 22px; height: 22px; place-self: center; border: 1px solid rgba(214, 243, 255, .18); border-radius: 50%; background: rgba(185, 232, 250, .08); content: ''; }
+.viewer-touch-controls button { position: relative; z-index: 2; display: grid; width: 40px; height: 40px; place-items: center; align-self: center; justify-self: center; border: 0; border-radius: 50%; background: transparent; color: rgba(237, 250, 255, .86); cursor: pointer; font-size: 17px; font-weight: 500; touch-action: none; -webkit-user-select: none; user-select: none; }
+.viewer-touch-controls button:active { background: rgba(169, 230, 252, .18); transform: scale(.96); }
+.walk-up { grid-area: 1 / 2; }
+.walk-left { grid-area: 2 / 1; }
+.walk-down { grid-area: 3 / 2; }
+.walk-right { grid-area: 2 / 3; }
+.viewer-reset-position { position: absolute; right: 18px; bottom: max(32px, calc(env(safe-area-inset-bottom) + 8px)); z-index: 5; min-height: 38px; padding: 0 14px; border: 1px solid rgba(216, 243, 255, .24); border-radius: 999px; background: rgba(4, 12, 21, .64); color: rgba(237, 249, 255, .82); cursor: pointer; font-size: 10px; backdrop-filter: blur(16px); }
+.viewer-reset-position:active { transform: scale(.98); }
+
+@media (prefers-reduced-transparency: reduce) {
+  .room-model-state,
+  .viewer-look-hint,
+  .viewer-touch-controls,
+  .viewer-reset-position { background: #0b1928; backdrop-filter: none; }
+}
+
+@media (max-width: 700px) {
+  .viewer-touch-controls { bottom: max(18px, env(safe-area-inset-bottom)); left: 14px; width: 118px; height: 118px; }
+  .viewer-reset-position { right: 14px; bottom: max(24px, calc(env(safe-area-inset-bottom) + 6px)); }
+}

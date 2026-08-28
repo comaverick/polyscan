@@ -217,7 +217,9 @@ export function selectBestKeyframes(keyframes, limit = 24) {
     const duplicate = selected.some((existing) => angularDifference(
       existing.viewpoint?.yaw || 0,
       keyframe.viewpoint?.yaw || 0,
-    ) < 8 && Math.abs((existing.viewpoint?.parallax || 0) - (keyframe.viewpoint?.parallax || 0)) < 0.02);
+    ) < 8
+      && Math.abs((existing.viewpoint?.parallax || 0) - (keyframe.viewpoint?.parallax || 0)) < 0.02
+      && Math.abs((existing.timestamp || 0) - (keyframe.timestamp || 0)) < 1200);
     if (!duplicate) selected.push(keyframe);
   });
   return selected.sort((first, second) => first.timestamp - second.timestamp);

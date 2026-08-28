@@ -15,11 +15,17 @@ import {
 } from './scanner/featureTracking';
 import { buildCaptureMesh } from './scanner/captureMesh';
 import {
+  captureVideoKeyframe,
+  countCapturedKeyframes,
+  resolveKeyframeAssets,
+} from './scanner/keyframeCapture';
+import {
   createCaptureManifest,
   getReconstructionJob,
   hasReconstructionEndpoint,
   submitCapture,
 } from './scanner/reconstructionClient';
+import RoomModelViewer from './viewer/RoomModelViewer';
 
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
@@ -31,6 +37,25 @@ function getReconstructionViewerUrl(result) {
   try {
     const url = new URL(value, window.location.href);
     return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function getReconstructionModelAsset(result) {
+  const value = result?.modelUrl || result?.model?.url || result?.glbUrl || result?.plyUrl;
+  if (!value) return null;
+  try {
+    const url = new URL(value, window.location.href);
+    if (!['http:', 'https:', 'blob:'].includes(url.protocol)) return null;
+    return {
+      url: url.href,
+      format: result?.modelFormat || result?.model?.format || (result?.plyUrl ? 'ply' : undefined),
+      kind: result?.modelKind || result?.model?.kind || 'mesh',
+      pointSize: result?.pointSize || result?.model?.pointSize,
+      coordinateSystem: result?.coordinateSystem || result?.model?.coordinateSystem,
+      metricScale: result?.metricScale || result?.model?.metricScale,
+    };
   } catch {
     return null;
   }
@@ -231,19 +256,23 @@ function Icon({ name, size = 18 }) {
 
 function RoomViewerScreen({ selectedKeyframes, reconstruction, onBack }) {
   const viewerUrl = getReconstructionViewerUrl(reconstruction);
+  const modelAsset = getReconstructionModelAsset(reconstruction);
+  const roomAvailable = Boolean(modelAsset || viewerUrl);
 
   return (
     <main className="room-viewer-screen">
       <header className="viewer-header">
         <button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to capture review"><Icon name="back" size={19} /></button>
         <div className="viewer-title">
-          <strong>{viewerUrl ? 'Reconstructed room' : 'Room unavailable'}</strong>
-          <span>{viewerUrl ? `${selectedKeyframes.length || 0} source viewpoints` : 'No reconstructed geometry'}</span>
+          <strong>{roomAvailable ? 'Reconstructed room' : 'Room unavailable'}</strong>
+          <span>{roomAvailable ? `${selectedKeyframes.length || reconstruction?.imageCount || 0} source viewpoints` : 'No reconstructed geometry'}</span>
         </div>
       </header>
-      <section className="viewer-stage" aria-label={viewerUrl ? 'Reconstructed room viewer' : 'Reconstructed room unavailable'}>
-        {viewerUrl
-          ? <iframe className="viewer-remote-frame" src={viewerUrl} title="Reconstructed 3D room viewer" allow="fullscreen; xr-spatial-tracking" />
+      <section className="viewer-stage" aria-label={roomAvailable ? 'Reconstructed room viewer' : 'Reconstructed room unavailable'}>
+        {modelAsset
+          ? <RoomModelViewer asset={modelAsset} spawn={reconstruction?.spawn || reconstruction?.model?.spawn} />
+          : viewerUrl
+            ? <iframe className="viewer-remote-frame" src={viewerUrl} title="Reconstructed 3D room viewer" allow="fullscreen; xr-spatial-tracking" />
           : (
             <div className="viewer-missing-model" role="alert">
               <strong>No 3D model was produced.</strong>
@@ -270,7 +299,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
           <p className="eyebrow">Spatial camera</p>
           <h1>Capture the room.<br /><span>Reconstruct it for real.</span></h1>
           <p className="launch-description">
-            Record overlapping views on your phone, then send the video to the connected 3D reconstruction service.
+            Collect overlapping camera views on your phone, then build a walkable room model with photogrammetry.
           </p>
           {scanAvailable ? (
             <div className="launch-actions">
@@ -311,7 +340,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
           <div className="visual-room-edge visual-room-edge-left" />
           <div className="visual-room-edge visual-room-edge-right" />
           <div className="visual-crosshair" />
-          <div className="visual-caption">Live guidance records viewpoints. Geometry is built after upload.</div>
+          <div className="visual-caption">Full-size keyframes record the room. Geometry is built after upload.</div>
         </div>
       </section>
 
@@ -338,6 +367,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const recorderChunksRef = useRef([]);
   const recordingStartedAtRef = useRef(0);
   const [recordingError, setRecordingError] = useState('');
+  const [finishing, setFinishing] = useState(false);
 
   const resumeCamera = useCallback(() => {
     const video = videoRef.current;
@@ -516,13 +546,18 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         parallax: evidence.parallax,
       });
       const isFirstKeyframe = current.cameraKeyframes.length === 0;
+      const lastKeyframe = current.cameraKeyframes[current.cameraKeyframes.length - 1];
+      const timedDetailedView = currentFrame.features.length >= 8
+        && currentFrame.timestamp - (lastKeyframe?.timestamp || 0) >= 1400;
       let thumbnail = null;
       try {
         thumbnail = canvas.toDataURL('image/jpeg', 0.72);
       } catch {
         // Canvas export can be unavailable in restricted browsers.
       }
-      const nextKeyframes = evidence.tracking && (isFirstKeyframe || evidence.usefulViewpoint)
+      const shouldCaptureKeyframe = ((evidence.tracking && (isFirstKeyframe || evidence.usefulViewpoint)) || timedDetailedView)
+        && current.cameraKeyframes.length < 96;
+      const nextKeyframes = shouldCaptureKeyframe
         ? [...current.cameraKeyframes, {
           id: `keyframe-${current.cameraKeyframes.length + 1}`,
           timestamp: currentFrame.timestamp,
@@ -532,6 +567,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           sharpness: currentFrame.features.reduce((sum, feature) => sum + feature.score, 0),
           image: currentFrame,
           thumbnail,
+          capturePromise: captureVideoKeyframe(video),
         }]
         : current.cameraKeyframes;
 
@@ -564,7 +600,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     distinctViewpoints: scanState.distinctViewpoints,
     featureTracks: stableTrackCount,
     meaningfulCameraMotion: scanState.meaningfulCameraMotion,
-  });
+  }) || (keyframeCount >= 8 && scanState.frameCount >= 20);
   const mappingReady = keyframeCount > 0;
   const captureMesh = buildCaptureMesh(scanState.stableFeatures);
   const instruction = paused
@@ -593,9 +629,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           ? 'Recording'
           : 'Ready';
   const handleDone = async () => {
+    setFinishing(true);
     const capture = await stopCaptureRecording();
     setRecording(false);
-    onDone(selectBestKeyframes(scanState.cameraKeyframes), capture, scanState);
+    const selected = selectBestKeyframes(scanState.cameraKeyframes, 48);
+    const resolved = await resolveKeyframeAssets(selected);
+    onDone(resolved, capture, scanState);
   };
 
   return (
@@ -639,7 +678,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{captureMesh.length ? `${captureMesh.length} wrapped polygons` : mappingReady ? 'Finding surface detail' : 'Blue = unscanned'}</span>
+        <span className="scan-frame-count">{mappingReady ? `${keyframeCount} full-size views${captureMesh.length ? ` / ${captureMesh.length} guide polygons` : ''}` : 'Blue = unscanned'}</span>
       </div>
 
       <div className="scan-bottom-ui scan-reference-bottom">
@@ -660,11 +699,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
             type="button"
             className="scan-done-button"
             onClick={handleDone}
-            disabled={!viable}
+            disabled={!viable || finishing}
             aria-label={viable ? 'Done scanning' : 'Done scanning, waiting for basic map'}
           >
             <span className="done-check" aria-hidden="true">✓</span>
-            <span>Done</span>
+            <span>{finishing ? 'Saving' : 'Done'}</span>
           </button>
         </div>
       </div>
@@ -684,27 +723,30 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
 function ReviewScreen({ selectedKeyframes, capture, processingAvailable, onProcess, onScanAgain }) {
   const preview = selectedKeyframes.find((frame) => frame.thumbnail)?.thumbnail;
-  const hasCapture = Boolean(capture?.blob);
-  const duration = capture?.durationMs ? `${Math.max(1, Math.round(capture.durationMs / 1000))}s` : hasCapture ? 'Video' : selectedKeyframes.length ? 'Local' : 'None';
+  const hasVideo = Boolean(capture?.blob);
+  const imageCount = countCapturedKeyframes(selectedKeyframes);
+  const hasCapture = hasVideo || imageCount >= 8;
+  const duration = capture?.durationMs ? `${Math.max(1, Math.round(capture.durationMs / 1000))}s` : hasVideo ? 'Video' : imageCount ? 'Images' : 'None';
   return (
     <main className="review-screen capture-review-screen">
       <header className="review-header"><Wordmark /><span className="review-top-label">Capture review</span></header>
       <section className="capture-review-content">
         <div className="review-preview-card">
           {capture?.url ? <video className="review-capture-video" src={capture.url} controls playsInline preload="metadata" aria-label="Recorded room capture" /> : preview ? <img src={preview} alt="Selected room viewpoint" /> : <div className="review-preview-placeholder" aria-hidden="true"><div /><span /></div>}
-          <div className="review-preview-overlay"><span className="scan-live-dot" /> {hasCapture ? 'Video ready' : 'Local preview ready'}</div>
+          <div className="review-preview-overlay"><span className="scan-live-dot" /> {hasVideo ? 'Video and images ready' : hasCapture ? 'Image set ready' : 'Capture incomplete'}</div>
         </div>
         <div className="review-copy-block">
           <p className="eyebrow">Scan complete</p>
           <h1>Review your<br /><span>room capture.</span></h1>
-          <p>{hasCapture ? 'Your video is ready for server-side 3D reconstruction. The live camera did not create geometry on this phone.' : 'A recorded video is required before PolyScan can reconstruct a real 3D room.'}</p>
+          <p>{hasCapture ? 'Your overlapping camera views are ready for server-side photogrammetry and a real room mesh.' : 'Scan more overlapping views before PolyScan can reconstruct the room.'}</p>
           <div className="review-stats" aria-label="Capture summary">
             <span><strong>{selectedKeyframes.length || 0}</strong> viewpoints</span>
+            <span><strong>{imageCount}</strong> full-size images</span>
             <span><strong>{duration}</strong> capture</span>
           </div>
           <div className="review-actions">
             <button type="button" className="primary-action" onClick={onProcess} disabled={!hasCapture || !processingAvailable}>
-              <span>{!hasCapture ? 'Video required' : processingAvailable ? 'Reconstruct 3D room' : '3D processing not connected'}</span>
+              <span>{!hasCapture ? 'More views required' : processingAvailable ? 'Reconstruct 3D room' : '3D processing not connected'}</span>
               <span className="action-arrow" aria-hidden="true">↗</span>
             </button>
             {!processingAvailable && <small className="build-note">Connect the reconstruction API before this capture can become a 3D model.</small>}
@@ -745,7 +787,7 @@ function ProcessingScreen({ buildState, onOpenViewer, onRetry, onBack }) {
           {isWorking && (
             <div className="build-processing-status" role="status" aria-live="polite">
               <span className="build-processing-dot" aria-hidden="true" />
-              <span>{buildState.status === 'uploading' ? 'Uploading capture' : 'Reconstructing room'}</span>
+              <span>{buildState.status === 'uploading' ? 'Uploading capture' : 'Reconstructing room'}{Number.isFinite(buildState.progress) ? ` ${Math.round(buildState.progress)}%` : ''}</span>
             </div>
           )}
           {buildState.status === 'error' && <button type="button" className="primary-action" onClick={onRetry}><span>Try again</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
@@ -940,7 +982,7 @@ function App() {
       setBuildState((current) => ({ ...current, status: 'processing', progress, jobId }));
       if (['complete', 'completed', 'ready', 'succeeded'].includes(status)) {
         const output = job.output || job;
-        if (!getReconstructionViewerUrl(output)) throw new Error('Reconstruction finished without a usable 3D viewer URL. The fake local room preview has been disabled.');
+        if (!getReconstructionModelAsset(output) && !getReconstructionViewerUrl(output)) throw new Error('Reconstruction finished without a usable room model.');
         setReconstruction(output);
         setBuildState({ status: 'ready', progress: 100, jobId, error: null });
         return;
@@ -954,8 +996,9 @@ function App() {
     buildAbortRef.current?.abort();
     const manifest = createCaptureManifest(scanState, selectedKeyframes);
     setScreen('processing');
-    if (!capture?.blob) {
-      setBuildState({ status: 'error', progress: 0, jobId: null, error: 'A recorded room video is required for real 3D reconstruction.', manifest });
+    const imageCount = countCapturedKeyframes(selectedKeyframes);
+    if (!capture?.blob && imageCount < 8) {
+      setBuildState({ status: 'error', progress: 0, jobId: null, error: 'At least eight full-size room viewpoints or a recorded video are required.', manifest });
       return;
     }
     if (!hasReconstructionEndpoint()) {
@@ -967,7 +1010,8 @@ function App() {
     buildAbortRef.current = controller;
     setBuildState({ status: 'uploading', progress: 0, jobId: null, error: null, manifest });
     submitCapture({
-      blob: capture.blob,
+      capture,
+      keyframes: selectedKeyframes,
       manifest,
       signal: controller.signal,
       onProgress: (progress) => setBuildState((current) => ({ ...current, status: 'uploading', progress })),
@@ -977,7 +1021,7 @@ function App() {
       const status = String(job.status || '').toLowerCase();
       if (job.output || ['complete', 'completed', 'ready', 'succeeded'].includes(status)) {
         const output = job.output || job;
-        if (!getReconstructionViewerUrl(output)) throw new Error('Reconstruction finished without a usable 3D viewer URL. The fake local room preview has been disabled.');
+        if (!getReconstructionModelAsset(output) && !getReconstructionViewerUrl(output)) throw new Error('Reconstruction finished without a usable room model.');
         setReconstruction(output);
         setBuildState({ status: 'ready', progress: 100, jobId, error: null });
         return;

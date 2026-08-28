@@ -1,0 +1,117 @@
+const fs = require('fs');
+const path = require('path');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
+
+const execFileAsync = promisify(execFile);
+
+async function run(binary, args, options = {}) {
+  try {
+    return await execFileAsync(binary, args, {
+      cwd: options.cwd,
+      windowsHide: true,
+      maxBuffer: 16 * 1024 * 1024,
+      env: process.env,
+    });
+  } catch (error) {
+    const detail = String(error.stderr || error.stdout || error.message || '').trim();
+    throw new Error(`${path.basename(binary)} failed${detail ? `: ${detail}` : ''}`);
+  }
+}
+
+function existingAssets(captureDirectory, assets, kind) {
+  return (assets || [])
+    .filter((asset) => asset.kind === kind)
+    .map((asset) => ({ ...asset, path: path.join(captureDirectory, asset.storedName) }))
+    .filter((asset) => fs.existsSync(asset.path));
+}
+
+async function prepareImages({ captureDirectory, assets, workspace, onProgress }) {
+  const imagesDirectory = path.join(workspace, 'images');
+  fs.mkdirSync(imagesDirectory, { recursive: true });
+  const photos = existingAssets(captureDirectory, assets, 'image');
+  photos.forEach((photo, index) => {
+    const extension = path.extname(photo.filename || photo.storedName) || '.jpg';
+    fs.copyFileSync(photo.path, path.join(imagesDirectory, `frame-${String(index + 1).padStart(4, '0')}${extension}`));
+  });
+
+  if (photos.length < 12) {
+    const [video] = existingAssets(captureDirectory, assets, 'video');
+    if (video) {
+      const ffmpeg = process.env.FFMPEG_PATH || 'ffmpeg';
+      onProgress(5, 'Extracting sharp video frames');
+      await run(ffmpeg, [
+        '-hide_banner', '-loglevel', 'error', '-i', video.path,
+        '-vf', 'fps=2,scale=1600:-2:force_original_aspect_ratio=decrease',
+        '-q:v', '2', path.join(imagesDirectory, 'video-%04d.jpg'),
+      ], { cwd: workspace });
+    }
+  }
+
+  const imageCount = fs.readdirSync(imagesDirectory).filter((name) => /\.(jpe?g|png)$/i.test(name)).length;
+  if (imageCount < 12) throw new Error('At least 12 overlapping room images are required for reconstruction.');
+  return { imagesDirectory, imageCount };
+}
+
+async function runColmapPipeline({ captureDirectory, assets, workspace, onProgress = () => {} }) {
+  const colmap = process.env.COLMAP_PATH || 'colmap';
+  fs.mkdirSync(workspace, { recursive: true });
+  const { imagesDirectory, imageCount } = await prepareImages({ captureDirectory, assets, workspace, onProgress });
+  const databasePath = path.join(workspace, 'database.db');
+  const sparseDirectory = path.join(workspace, 'sparse');
+  const denseDirectory = path.join(workspace, 'dense');
+  fs.mkdirSync(sparseDirectory, { recursive: true });
+  fs.mkdirSync(denseDirectory, { recursive: true });
+
+  onProgress(12, `Finding features in ${imageCount} images`);
+  await run(colmap, [
+    'feature_extractor', '--database_path', databasePath, '--image_path', imagesDirectory,
+    '--ImageReader.single_camera', '1', '--ImageReader.camera_model', 'SIMPLE_RADIAL',
+    '--SiftExtraction.use_gpu', process.env.COLMAP_USE_GPU === '0' ? '0' : '1',
+  ], { cwd: workspace });
+
+  onProgress(27, 'Matching overlapping viewpoints');
+  await run(colmap, [
+    'sequential_matcher', '--database_path', databasePath,
+    '--SiftMatching.guided_matching', '1',
+    '--SiftMatching.use_gpu', process.env.COLMAP_USE_GPU === '0' ? '0' : '1',
+  ], { cwd: workspace });
+
+  onProgress(42, 'Solving camera positions');
+  await run(colmap, [
+    'mapper', '--database_path', databasePath, '--image_path', imagesDirectory,
+    '--output_path', sparseDirectory,
+  ], { cwd: workspace });
+
+  const sparseModels = fs.readdirSync(sparseDirectory, { withFileTypes: true }).filter((entry) => entry.isDirectory());
+  if (!sparseModels.length) throw new Error('The images did not have enough overlap to solve a room model.');
+  const sparseModel = path.join(sparseDirectory, sparseModels[0].name);
+
+  onProgress(58, 'Preparing dense reconstruction');
+  await run(colmap, [
+    'image_undistorter', '--image_path', imagesDirectory, '--input_path', sparseModel,
+    '--output_path', denseDirectory, '--output_type', 'COLMAP', '--max_image_size', '1600',
+  ], { cwd: workspace });
+
+  onProgress(66, 'Estimating depth');
+  await run(colmap, [
+    'patch_match_stereo', '--workspace_path', denseDirectory,
+    '--workspace_format', 'COLMAP', '--PatchMatchStereo.geom_consistency', 'true',
+  ], { cwd: workspace });
+
+  const fusedPath = path.join(denseDirectory, 'fused.ply');
+  onProgress(82, 'Fusing the room surface');
+  await run(colmap, [
+    'stereo_fusion', '--workspace_path', denseDirectory, '--workspace_format', 'COLMAP',
+    '--input_type', 'geometric', '--output_path', fusedPath,
+  ], { cwd: workspace });
+
+  const modelPath = path.join(workspace, 'room.ply');
+  onProgress(91, 'Building the walkable mesh');
+  await run(colmap, ['poisson_mesher', '--input_path', fusedPath, '--output_path', modelPath], { cwd: workspace });
+  if (!fs.existsSync(modelPath)) throw new Error('COLMAP completed without producing a room mesh.');
+  onProgress(100, 'Room ready');
+  return { modelPath, imageCount, format: 'ply', kind: 'mesh' };
+}
+
+module.exports = { runColmapPipeline };

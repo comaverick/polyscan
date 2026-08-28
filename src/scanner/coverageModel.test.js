@@ -123,6 +123,14 @@ test('Done can select best non-duplicate keyframes while leaving incomplete regi
   expect(selectBestKeyframes(keyframes).map((keyframe) => keyframe.id)).toEqual(['one', 'three']);
 });
 
+test('keeps repeated room directions when they were captured from separated moments', () => {
+  const keyframes = [
+    { id: 'first-pass', timestamp: 1000, sharpness: 6, viewpoint: { yaw: 8, parallax: 0.1 } },
+    { id: 'later-pass', timestamp: 3200, sharpness: 7, viewpoint: { yaw: 9, parallax: 0.105 } },
+  ];
+  expect(selectBestKeyframes(keyframes).map((keyframe) => keyframe.id)).toEqual(['first-pass', 'later-pass']);
+});
+
 test('no semantic target is needed to update the directional map', () => {
   const cells = updateDirectionalCoverage(createDirectionalCoverage(), {
     visibleCellIds: ['1-8', '1-9', '1-10'],

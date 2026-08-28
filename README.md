@@ -1,97 +1,114 @@
-# Getting Started with Create React App
+# PolyScan
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+PolyScan is a mobile-web room capture interface backed by real photogrammetry. The phone records overlapping, full-size image keyframes and an optional video. A reconstruction worker turns those assets into a room mesh, and the React app opens the result in a touch-first first-person viewer.
 
-## Available Scripts
+The blue camera layer is capture guidance only. It is not depth data and it is not the reconstructed room.
 
-In the project directory, you can run:
+## Run the web app
 
-### `npm start`
-
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
-
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
-
-### `npm test`
-
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
-
-### `npm run build`
-
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
-
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
-
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
-
-### `npm run eject`
-
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
-
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
-
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
-
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
-
-## Learn More
-
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
-
-To learn React, check out the [React documentation](https://reactjs.org/).
-
-### Code Splitting
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
-
-### Analyzing the Bundle Size
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
-
-### Making a Progressive Web App
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
-
-## PolyScan web capture
-
-The scanner is designed as a web-first capture flow. The phone records a supported camera stream and keeps lightweight local coverage guidance. If camera access is unavailable, the launch screen accepts a recorded video from the phone instead.
-
-The live camera is capture guidance, not reconstructed geometry. It records overlapping viewpoints and camera video. A blue screen-space mask marks areas that still need detail, while short edge-aware polygons reveal tracked image regions and provide a wrapped 3D-style capture effect.
-
-Without a reconstruction service configured, the app keeps the capture on the phone and disables the 3D build action. It never substitutes a synthetic room, screen-space polygons, or an unmeasured local model.
-
-### Connect reconstruction processing
-
-Add this Vercel environment variable:
-
-```text
-REACT_APP_RECONSTRUCTION_API_URL=https://your-reconstruction-service.example.com
+```powershell
+npm install
+npm start
 ```
 
-The service must provide these endpoints:
+Live camera capture requires HTTPS when opened from a phone. For desktop interface testing, open `http://localhost:3000/?mobilePreview=1`.
 
-1. `POST /uploads` accepts `{ filename, contentType, size, manifest }` and returns `{ uploadUrl, captureId }`.
-2. The browser uploads the video directly to `uploadUrl` with `PUT`.
-3. `POST /jobs` accepts `{ captureId, manifest }` and returns `{ id, status }`.
-4. `GET /jobs/:id` returns `{ status, progress, message, output }` while the job runs.
+## Reconstruction architecture
 
-When complete, the job must return `output.viewerUrl` pointing to a hosted first-person Gaussian Splat or mesh viewer. PolyScan rejects a completed job without that URL. A reconstruction worker should create the visual splat and a metrically scaled mesh separately; AI gap filling should not be used as the source of measurement truth.
+```text
+Mobile camera
+  -> full-size JPEG keyframes and optional video
+  -> reconstruction upload service
+  -> COLMAP Structure-from-Motion and Multi-View Stereo
+  -> PLY room mesh
+  -> in-app Three.js first-person viewer
+```
 
-Keep Vercel as the frontend and API coordinator. Store large videos with direct or multipart uploads and run reconstruction asynchronously in a queue or GPU worker. Do not run the full reconstruction inside the browser or a normal page request.
+PolyScan does not manufacture local geometry if reconstruction fails. A completed job must return one of:
+
+```json
+{
+  "modelUrl": "https://models.example.com/room.glb",
+  "modelFormat": "glb",
+  "modelKind": "mesh"
+}
+```
+
+or:
+
+```json
+{
+  "modelUrl": "https://models.example.com/room.ply",
+  "modelFormat": "ply",
+  "modelKind": "mesh",
+  "coordinateSystem": "colmap-camera"
+}
+```
+
+For camera-only models without a known measurement, the viewer estimates a comfortable room scale from the vertical extent. Return `metricScale` when the processing pipeline has a real unit conversion.
+
+An existing hosted viewer can still be returned as `{ "viewerUrl": "https://..." }`.
+
+## Run the reconstruction service
+
+The repository includes a local service in `server/reconstruction-server.cjs`. It accepts image/video assets, queues a job, runs COLMAP, and serves the generated PLY mesh.
+
+Requirements:
+
+- COLMAP available as `colmap`, or set `COLMAP_PATH`
+- An NVIDIA GPU is strongly recommended
+- FFmpeg is required only when reconstructing an imported video without enough saved image keyframes
+- At least 12 overlapping images; 40 or more is recommended for a room
+
+Copy `.env.example` to `.env.local` for the React app, then set the environment variables in your terminal before running the worker. Create React App does not automatically expose worker-only variables from `.env.local` to Node.
+
+```powershell
+$env:REACT_APP_RECONSTRUCTION_API_URL='http://127.0.0.1:8787'
+$env:PUBLIC_BASE_URL='http://127.0.0.1:8787'
+$env:ALLOWED_ORIGIN='http://localhost:3000'
+$env:COLMAP_PATH='C:\path\to\COLMAP\bin\colmap.exe'
+npm run reconstruction-server
+```
+
+In a second terminal:
+
+```powershell
+$env:REACT_APP_RECONSTRUCTION_API_URL='http://127.0.0.1:8787'
+npm start
+```
+
+For a phone on the same network, `PUBLIC_BASE_URL` and `REACT_APP_RECONSTRUCTION_API_URL` must use the computer's reachable HTTPS address, not `127.0.0.1`.
+
+## Reconstruction API
+
+### `POST /uploads`
+
+Accepts a manifest and an asset list. It returns a capture ID and one upload URL per asset.
+
+### `PUT /uploads/:captureId/:assetId`
+
+Receives an image or video directly.
+
+### `POST /jobs`
+
+Accepts `{ "captureId": "...", "manifest": {} }` and returns a queued job.
+
+### `GET /jobs/:jobId`
+
+Returns job status, progress, a message, and the final output.
+
+## Capture guidance
+
+- Walk around the room instead of rotating from one position.
+- Keep 60-80% overlap between views.
+- Move slowly to avoid motion blur.
+- Keep corners, picture frames, furniture edges, and other textured details visible.
+- Plain walls, mirrors, windows, and shiny surfaces are difficult for camera-only reconstruction.
+- Include a known measurement if metric scale matters.
+
+## Scripts
+
+- `npm start`: start the React development server
+- `npm test -- --watchAll=false`: run tests once
+- `npm run build`: create a production build
+- `npm run reconstruction-server`: start the local reconstruction API and COLMAP worker
