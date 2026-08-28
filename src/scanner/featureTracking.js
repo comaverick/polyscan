@@ -179,3 +179,83 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
     visibleCellIds: getVisibleCellIds({ yaw, pitch }),
   };
 }
+
+function triangleArea(first, second, third) {
+  return Math.abs(
+    (first.x * (second.y - third.y)
+      + second.x * (third.y - first.y)
+      + third.x * (first.y - second.y)) / 2,
+  );
+}
+
+/**
+ * Builds a lightweight screen-space mesh from stable tracked features.
+ *
+ * This is deliberately a capture-feedback mesh, not reconstructed geometry.
+ * Its job is to make locally verified image regions feel spatial while the
+ * reconstruction service remains the source of real 3D output.
+ */
+export function buildScreenMesh(features = [], options = {}) {
+  const minimumConfidence = options.minimumConfidence ?? 0.18;
+  const maximumEdge = options.maximumEdge ?? 0.22;
+  const minimumArea = options.minimumArea ?? 0.00035;
+  const maximumArea = options.maximumArea ?? 0.018;
+  const maximumTriangles = options.maximumTriangles ?? 96;
+  const neighborCount = options.neighborCount ?? 5;
+  const points = features
+    .filter((feature) => Number.isFinite(feature.x)
+      && Number.isFinite(feature.y)
+      && feature.x >= 0 && feature.x <= 1
+      && feature.y >= 0 && feature.y <= 1
+      && (feature.confidence ?? 0) >= minimumConfidence)
+    .map((feature, index) => ({ ...feature, meshId: feature.id || `mesh-point-${index}` }));
+  const used = new Set();
+  const triangles = [];
+
+  points.forEach((anchor) => {
+    const neighbors = points
+      .filter((point) => point !== anchor)
+      .map((point) => ({ point, distance: Math.hypot(point.x - anchor.x, point.y - anchor.y) }))
+      .filter(({ distance }) => distance <= maximumEdge)
+      .sort((first, second) => first.distance - second.distance)
+      .slice(0, neighborCount);
+
+    let trianglesForAnchor = 0;
+    for (let firstIndex = 0; firstIndex < neighbors.length - 1; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < neighbors.length; secondIndex += 1) {
+        const first = neighbors[firstIndex].point;
+        const second = neighbors[secondIndex].point;
+        const key = [anchor.meshId, first.meshId, second.meshId].sort().join('|');
+        if (used.has(key)) continue;
+
+        const area = triangleArea(anchor, first, second);
+        const longestEdge = Math.max(
+          Math.hypot(anchor.x - first.x, anchor.y - first.y),
+          Math.hypot(anchor.x - second.x, anchor.y - second.y),
+          Math.hypot(first.x - second.x, first.y - second.y),
+        );
+        const shapeQuality = area / Math.max(longestEdge * longestEdge, 0.000001);
+        if (area < minimumArea || area > maximumArea || shapeQuality < 0.045) continue;
+
+        used.add(key);
+        const screenVertices = [anchor, first, second].map(({ x, y }) => ({ x, y }));
+        triangles.push({
+          id: `mesh-${key}`,
+          confidence: clamp(((anchor.confidence || 0) + (first.confidence || 0) + (second.confidence || 0)) / 3),
+          screenVertices,
+          centroid: {
+            x: screenVertices.reduce((sum, vertex) => sum + vertex.x, 0) / 3,
+            y: screenVertices.reduce((sum, vertex) => sum + vertex.y, 0) / 3,
+          },
+        });
+        trianglesForAnchor += 1;
+        if (trianglesForAnchor >= 3 || triangles.length >= maximumTriangles) break;
+      }
+      if (trianglesForAnchor >= 3 || triangles.length >= maximumTriangles) break;
+    }
+  });
+
+  return triangles
+    .sort((first, second) => second.confidence - first.confidence)
+    .slice(0, maximumTriangles);
+}

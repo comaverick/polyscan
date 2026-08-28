@@ -11,6 +11,7 @@ import {
 } from './scanner/coverageModel';
 import {
   buildFrameEvidence,
+  buildScreenMesh,
   extractFrameFeatures,
   updateFeatureTracks,
 } from './scanner/featureTracking';
@@ -24,6 +25,15 @@ import {
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
+
+function isMobileScanDevice() {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  const previewOverride = process.env.NODE_ENV !== 'production'
+    && new URLSearchParams(window.location.search).get('mobilePreview') === '1';
+  const mobileUserAgent = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+  const iPadDesktopMode = /Macintosh/i.test(navigator.userAgent || '') && navigator.maxTouchPoints > 1;
+  return previewOverride || mobileUserAgent || iPadDesktopMode;
+}
 
 const createEmptyScanState = () => ({
   directionalCoverage: createDirectionalCoverage(),
@@ -125,6 +135,8 @@ function CoverageCanvas({
 
     let frameId;
     let active = true;
+    let lastDrawAt = 0;
+    const coverageLookup = new Map(cells.map((cell) => [`${cell.pitchBand}-${cell.yawIndex}`, cell]));
 
     const resizeCanvas = () => {
       const rect = canvas.getBoundingClientRect();
@@ -206,11 +218,17 @@ function CoverageCanvas({
             else context.lineTo(x, y);
           });
           context.closePath();
-          context.fillStyle = 'rgba(194, 238, 255, 0.13)';
-          context.strokeStyle = 'rgba(219, 249, 255, 0.42)';
-          context.lineWidth = 1;
-          context.fill();
+          context.strokeStyle = `rgba(230, 250, 255, ${0.2 + patch.confidence * 0.5})`;
+          context.lineWidth = 0.75;
           context.stroke();
+          const center = patch.centroid || {
+            x: patch.screenVertices.reduce((sum, vertex) => sum + vertex.x, 0) / patch.screenVertices.length,
+            y: patch.screenVertices.reduce((sum, vertex) => sum + vertex.y, 0) / patch.screenVertices.length,
+          };
+          context.beginPath();
+          context.arc(center.x * width, center.y * height, 1.15, 0, Math.PI * 2);
+          context.fillStyle = 'rgba(241, 253, 255, 0.74)';
+          context.fill();
         });
 
       sparsePoints
@@ -243,7 +261,7 @@ function CoverageCanvas({
       const pitchFraction = Math.max(0, Math.min(1, pitchPosition - pitchBase));
       const getCoverage = (pitchBand, yawIndex) => {
         const wrappedYaw = ((yawIndex % yawBins) + yawBins) % yawBins;
-        const cell = cells.find((candidate) => candidate.pitchBand === pitchBand && candidate.yawIndex === wrappedYaw);
+        const cell = coverageLookup.get(`${pitchBand}-${wrappedYaw}`);
         return displayedRef.current.get(cell?.id) ?? cell?.coverage ?? 0;
       };
       const topLeft = getCoverage(pitchBase, yawBase);
@@ -259,13 +277,13 @@ function CoverageCanvas({
     const drawCoverageMask = (context, width, height) => {
       context.save();
       if (!mappingReady) {
-        context.fillStyle = 'rgba(25, 151, 235, .42)';
+        context.fillStyle = 'rgba(31, 83, 225, .58)';
         context.fillRect(0, 0, width, height);
         context.restore();
         return;
       }
 
-      const maskWidth = Math.min(180, Math.max(96, Math.round(width / 3)));
+      const maskWidth = Math.min(128, Math.max(72, Math.round(width / 4)));
       const maskHeight = Math.max(64, Math.round(maskWidth * height / Math.max(width, 1)));
       if (maskCanvas.width !== maskWidth || maskCanvas.height !== maskHeight) {
         maskCanvas.width = maskWidth;
@@ -282,9 +300,9 @@ function CoverageCanvas({
           const coverage = sampleCoverage(x / Math.max(maskWidth - 1, 1), y / Math.max(maskHeight - 1, 1));
           const alpha = Math.round(coverageOpacity(coverage) * 255);
           const index = (y * maskWidth + x) * 4;
-          image.data[index] = 25;
-          image.data[index + 1] = 151;
-          image.data[index + 2] = 235;
+          image.data[index] = 31;
+          image.data[index + 1] = 83;
+          image.data[index + 2] = 225;
           image.data[index + 3] = alpha;
         }
       }
@@ -295,8 +313,35 @@ function CoverageCanvas({
       context.restore();
     };
 
-    const draw = () => {
+    const revealScannedMesh = (context, width, height) => {
+      const patches = surfacePatches.filter((patch) => patch.confidence >= 0.18 && patch.screenVertices?.length >= 3);
+      if (!patches.length) return;
+      context.save();
+      context.globalCompositeOperation = 'destination-out';
+      patches.forEach((patch) => {
+        context.beginPath();
+        patch.screenVertices.forEach((vertex, index) => {
+          const x = vertex.x * width;
+          const y = vertex.y * height;
+          if (index === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        });
+        context.closePath();
+        context.fillStyle = `rgba(0, 0, 0, ${Math.min(0.96, 0.58 + patch.confidence * 0.4)})`;
+        context.shadowColor = 'rgba(0, 0, 0, 0.68)';
+        context.shadowBlur = 9;
+        context.fill();
+      });
+      context.restore();
+    };
+
+    const draw = (timestamp = 0) => {
       if (!active) return;
+      if (timestamp - lastDrawAt < 1000 / 30) {
+        frameId = window.requestAnimationFrame(draw);
+        return;
+      }
+      lastDrawAt = timestamp;
       const rect = canvas.getBoundingClientRect();
       const width = rect.width;
       const height = rect.height;
@@ -322,6 +367,7 @@ function CoverageCanvas({
       });
 
       drawCoverageMask(context, width, height);
+      revealScannedMesh(context, width, height);
       drawTrackedFeatures(context, width, height);
       drawGeometry(context, width, height);
       frameId = window.requestAnimationFrame(draw);
@@ -338,53 +384,6 @@ function CoverageCanvas({
   }, [cells, mappingReady, parallax, sparsePoints, stableFeatures, surfacePatches, view]);
 
   return <canvas ref={canvasRef} className="coverage-canvas" data-coverage-state={mappingReady ? 'directional' : 'initial-blue'} aria-hidden="true" />;
-}
-
-function CoverageMap({ cells, view, paused, trackingState }) {
-  const visibleIds = new Set(getVisibleCellIds({ yaw: view.yaw, pitch: view.pitch, yawBins: 20 }));
-  const scannedCells = cells.filter((cell) => cell.coverage >= 0.2).length;
-  const visibleUnscanned = cells.filter((cell) => visibleIds.has(cell.id) && cell.coverage < 0.2).length;
-  const hint = paused
-    ? 'Scan paused'
-    : trackingState === 'lost'
-      ? 'Aim at an edge or corner'
-      : !scannedCells
-        ? 'Move slowly. Blue areas are still unscanned'
-        : visibleUnscanned
-          ? 'Move toward the blue areas'
-          : 'Mapped areas stay in the camera color';
-  const pitchLabels = ['Ceiling', 'Walls', 'Floor'];
-
-  return (
-    <aside className="coverage-map-card" aria-label="Directional room coverage map">
-      <div className="coverage-map-header">
-        <div><span className="coverage-map-kicker">Room map</span><strong>Blue to scan</strong></div>
-        <div className="coverage-map-live-label">Live</div>
-      </div>
-      <div className="coverage-map-surfaces">
-        {pitchLabels.map((label, pitchBand) => (
-          <div className="coverage-map-surface" key={label}>
-            <span className="coverage-map-surface-label">{label}</span>
-            <div className="coverage-map-grid">
-              {cells.filter((cell) => cell.pitchBand === pitchBand).map((cell) => (
-                <span
-                  key={cell.id}
-                  className={`coverage-map-cell coverage-${cell.status || 'unknown'}${visibleIds.has(cell.id) ? ' is-current' : ''}`}
-                  style={{ '--coverage': cell.coverage }}
-                  title={`${cell.status || 'unknown'} scan zone`}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-      <div className="coverage-map-hint"><span className="coverage-map-hint-icon">+</span><span>{hint}</span></div>
-      <div className="coverage-map-footer">
-        <span><i className="coverage-legend-dot is-unscanned" /> to capture</span>
-        <span><i className="coverage-legend-dot is-filled" /> scanned</span>
-      </div>
-    </aside>
-  );
 }
 
 function RoomModelCanvas({ rotation, zoom, frameIndex, hasCapture, firstPerson = false }) {
@@ -682,7 +681,7 @@ function RoomViewerScreen({ selectedKeyframes, reconstruction, onBack }) {
   );
 }
 
-function LaunchScreen({ onStart, onImportCapture }) {
+function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
   return (
     <main className="launch-screen">
       <header className="launch-header">
@@ -697,23 +696,32 @@ function LaunchScreen({ onStart, onImportCapture }) {
           <p className="launch-description">
             Move through the space and watch the blue field clear as useful viewpoints accumulate.
           </p>
-          <button type="button" className="primary-action" onClick={onStart}>
-            <span>Start scan</span>
-            <span className="action-arrow" aria-hidden="true">↗</span>
-          </button>
-          <label className="launch-import-action">
-            <span>Use a recorded video</span>
-            <input
-              type="file"
-              accept="video/*"
-              capture="environment"
-              onChange={(event) => {
-                const [file] = event.target.files || [];
-                if (file) onImportCapture(file);
-                event.target.value = '';
-              }}
-            />
-          </label>
+          {scanAvailable ? (
+            <div className="launch-actions">
+              <button type="button" className="primary-action" onClick={onStart}>
+                <span>Start scan</span>
+                <span className="action-arrow" aria-hidden="true">↗</span>
+              </button>
+              <label className="launch-import-action">
+                <span>Use a recorded video</span>
+                <input
+                  type="file"
+                  accept="video/*"
+                  capture="environment"
+                  onChange={(event) => {
+                    const [file] = event.target.files || [];
+                    if (file) onImportCapture(file);
+                    event.target.value = '';
+                  }}
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="desktop-scan-note" role="status">
+              <strong>Open PolyScan on your phone</strong>
+              <span>Live scanning uses the phone camera and motion sensors.</span>
+            </div>
+          )}
         </div>
 
         <div className="launch-visual" aria-label="Room scan preview">
@@ -932,6 +940,10 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         featureConfidence: evidence.featureConfidence,
         parallax: evidence.parallax,
       });
+      const meshActive = current.meaningfulCameraMotion || evidence.usefulViewpoint;
+      const surfacePatches = meshActive && evidence.tracking
+        ? buildScreenMesh(evidence.stableFeatures)
+        : [];
 
       const isFirstKeyframe = current.cameraKeyframes.length === 0;
       let thumbnail = null;
@@ -962,6 +974,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         distinctViewpoints: current.distinctViewpoints + (evidence.usefulViewpoint ? 1 : 0),
         meaningfulCameraMotion: current.meaningfulCameraMotion || evidence.usefulViewpoint,
         stableFeatures: evidence.stableFeatures,
+        surfacePatches,
         lastFrame: { ...currentFrame, viewpoint: evidence.viewpoint },
         lastViewpoint: evidence.viewpoint,
         lastEvidence: evidence,
@@ -985,6 +998,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     meaningfulCameraMotion: scanState.meaningfulCameraMotion,
   });
   const mappingReady = keyframeCount > 0;
+  const meshPatchCount = scanState.surfacePatches.length;
   const instruction = paused
     ? 'Paused'
     : trackingState === 'lost'
@@ -1065,14 +1079,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{mappingReady ? 'Map active' : 'Blue = unscanned'}</span>
+        <span className="scan-frame-count">{mappingReady ? (meshPatchCount ? 'Mesh active' : 'Finding surfaces') : 'Blue = unscanned'}</span>
       </div>
-      <CoverageMap
-        cells={scanState.directionalCoverage}
-        view={view}
-        paused={paused}
-        trackingState={trackingState}
-      />
 
       <div className="scan-bottom-ui scan-reference-bottom">
         <div className="scan-guidance" role="status" aria-live="polite">
@@ -1194,6 +1202,7 @@ function ProcessingScreen({ selectedKeyframes, capture, buildState, onOpenViewer
 }
 
 function App() {
+  const scanAvailable = isMobileScanDevice();
   const [screen, setScreen] = useState('launch');
   const [paused, setPaused] = useState(false);
   const [scanState, setScanState] = useState(createEmptyScanState);
@@ -1313,6 +1322,7 @@ function App() {
   };
 
   const startScan = () => {
+    if (!isMobileScanDevice()) return;
     cameraSessionRef.current += 1;
     stopCamera();
     buildAbortRef.current?.abort();
@@ -1417,7 +1427,7 @@ function App() {
   }, [capture, pollReconstruction, scanState, selectedKeyframes]);
 
   let activeScreen;
-  if (screen === 'launch') activeScreen = <LaunchScreen onStart={startScan} onImportCapture={importCapture} />;
+  if (screen === 'launch') activeScreen = <LaunchScreen onStart={startScan} onImportCapture={importCapture} scanAvailable={scanAvailable} />;
   else if (screen === 'scan') {
     activeScreen = (
       <ScanScreen
@@ -1442,5 +1452,5 @@ function App() {
   return <div className="App">{activeScreen}</div>;
 }
 
-export { App, RoomViewerScreen, ScanScreen, createEmptyScanState };
+export { App, RoomViewerScreen, ScanScreen, createEmptyScanState, isMobileScanDevice };
 export default App;

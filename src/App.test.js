@@ -1,6 +1,14 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import App, { RoomViewerScreen } from './App';
 
+beforeEach(() => {
+  window.history.replaceState({}, '', '/?mobilePreview=1');
+});
+
+afterEach(() => {
+  window.history.replaceState({}, '', '/');
+});
+
 test('starts with a scan action and no progress UI', () => {
   render(<App />);
   expect(screen.getByRole('button', { name: /start scan/i })).toBeInTheDocument();
@@ -14,6 +22,7 @@ test('opens the camera surface with an initial blue state and disabled Done acti
   expect(screen.getByRole('button', { name: /done scanning, waiting/i })).toBeDisabled();
   expect(screen.getByText('Move around the room')).toBeInTheDocument();
   expect(document.querySelector('.coverage-canvas')).toHaveAttribute('data-coverage-state', 'initial-blue');
+  expect(screen.queryByLabelText('Directional room coverage map')).not.toBeInTheDocument();
 });
 
 test('does not silently stay on starting camera when camera access is unavailable', () => {
@@ -43,4 +52,11 @@ test('viewer measurement tool lets the user place and confirm a distance', () =>
   fireEvent.change(screen.getByLabelText('Real distance'), { target: { value: '3.2' } });
   fireEvent.click(screen.getByRole('button', { name: 'Confirm measurement' }));
   expect(screen.getByText('3.2 m confirmed')).toBeInTheDocument();
+});
+
+test('keeps live scanning unavailable on desktop browsers', () => {
+  window.history.replaceState({}, '', '/');
+  render(<App />);
+  expect(screen.queryByRole('button', { name: /start scan/i })).not.toBeInTheDocument();
+  expect(screen.getByText('Open PolyScan on your phone')).toBeInTheDocument();
 });
