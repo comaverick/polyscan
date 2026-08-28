@@ -139,16 +139,39 @@ function CoverageCanvas({
       const visible = stableFeatures.filter((feature) => feature.confidence >= 0.42);
       context.save();
       context.lineWidth = 1;
-      context.strokeStyle = 'rgba(209, 245, 255, 0.16)';
       for (let index = 0; index < visible.length; index += 1) {
         for (let nextIndex = index + 1; nextIndex < visible.length; nextIndex += 1) {
           const first = visible[index];
           const second = visible[nextIndex];
           const distance = Math.hypot(first.x - second.x, first.y - second.y);
           if (distance < 0.18) {
+            const confidence = Math.min(first.confidence, second.confidence);
+            const firstPoint = { x: first.x * width, y: first.y * height };
+            const secondPoint = { x: second.x * width, y: second.y * height };
+            const depth = Math.max(3, Math.min(18, parallax * width * 0.42));
+            const firstDepth = {
+              x: firstPoint.x + (first.x - 0.5) * depth,
+              y: firstPoint.y + (first.y - 0.5) * depth * 0.5,
+            };
+            const secondDepth = {
+              x: secondPoint.x + (second.x - 0.5) * depth,
+              y: secondPoint.y + (second.y - 0.5) * depth * 0.5,
+            };
+            context.strokeStyle = `rgba(213, 248, 255, ${0.18 + confidence * 0.32})`;
             context.beginPath();
-            context.moveTo(first.x * width, first.y * height);
-            context.lineTo(second.x * width, second.y * height);
+            context.moveTo(firstPoint.x, firstPoint.y);
+            context.lineTo(secondPoint.x, secondPoint.y);
+            context.stroke();
+            // A short offset edge gives tracked correspondences a spatial cue
+            // without drawing artificial wall-sized rectangles.
+            context.strokeStyle = `rgba(137, 225, 255, ${0.12 + confidence * 0.2})`;
+            context.beginPath();
+            context.moveTo(firstDepth.x, firstDepth.y);
+            context.lineTo(secondDepth.x, secondDepth.y);
+            context.moveTo(firstPoint.x, firstPoint.y);
+            context.lineTo(firstDepth.x, firstDepth.y);
+            context.moveTo(secondPoint.x, secondPoint.y);
+            context.lineTo(secondDepth.x, secondDepth.y);
             context.stroke();
           }
         }
@@ -207,101 +230,68 @@ function CoverageCanvas({
       context.restore();
     };
 
-    const projectCell = (cell, width, height) => {
+    const sampleCoverage = (screenX, screenY) => {
       const yawBins = cells[0]?.yawBins || 20;
       const yawSize = 360 / yawBins;
-      const cellYaw = cell.yawIndex * yawSize + yawSize / 2;
-      const yawDelta = ((cellYaw - view.yaw + 540) % 360) - 180;
-      const pitchCenter = cell.pitchBand === 0 ? 24 : cell.pitchBand === 1 ? 0 : -24;
-      const inCurrentView = Math.abs(yawDelta) <= 45 && Math.abs(pitchCenter - view.pitch) <= 34;
-      if (!inCurrentView) return null;
-
-      const centerX = width / 2 + (yawDelta / 78) * width;
-      const centerY = height / 2 - ((pitchCenter - view.pitch) / 58) * height;
-      const cellWidth = width * (yawSize / 78) * 1.01;
-      const cellHeight = height / 3.02;
-      if (centerX + cellWidth / 2 < 0 || centerX - cellWidth / 2 > width || centerY + cellHeight / 2 < 0 || centerY - cellHeight / 2 > height) return null;
-      return {
-        left: centerX - cellWidth / 2,
-        top: centerY - cellHeight / 2,
-        right: centerX + cellWidth / 2,
-        bottom: centerY + cellHeight / 2,
-        width: cellWidth,
-        height: cellHeight,
+      const roomYaw = ((view.yaw + (screenX - 0.5) * 78) % 360 + 360) % 360;
+      const yawPosition = roomYaw / yawSize - 0.5;
+      const yawBase = Math.floor(yawPosition);
+      const yawFraction = yawPosition - yawBase;
+      const pitch = Math.max(-24, Math.min(24, view.pitch + (0.5 - screenY) * 58));
+      const pitchPosition = (24 - pitch) / 24;
+      const pitchBase = Math.max(0, Math.min(1, Math.floor(pitchPosition)));
+      const pitchFraction = Math.max(0, Math.min(1, pitchPosition - pitchBase));
+      const getCoverage = (pitchBand, yawIndex) => {
+        const wrappedYaw = ((yawIndex % yawBins) + yawBins) % yawBins;
+        const cell = cells.find((candidate) => candidate.pitchBand === pitchBand && candidate.yawIndex === wrappedYaw);
+        return displayedRef.current.get(cell?.id) ?? cell?.coverage ?? 0;
       };
+      const topLeft = getCoverage(pitchBase, yawBase);
+      const topRight = getCoverage(pitchBase, yawBase + 1);
+      const bottomLeft = getCoverage(Math.min(2, pitchBase + 1), yawBase);
+      const bottomRight = getCoverage(Math.min(2, pitchBase + 1), yawBase + 1);
+      const top = topLeft + (topRight - topLeft) * yawFraction;
+      const bottom = bottomLeft + (bottomRight - bottomLeft) * yawFraction;
+      return top + (bottom - top) * pitchFraction;
     };
 
-    const drawCoverageRegions = (context, width, height) => {
+    const maskCanvas = document.createElement('canvas');
+    const drawCoverageMask = (context, width, height) => {
       context.save();
       if (!mappingReady) {
         context.fillStyle = 'rgba(25, 151, 235, .42)';
         context.fillRect(0, 0, width, height);
+        context.restore();
+        return;
       }
 
-      cells.forEach((cell) => {
-        const projection = projectCell(cell, width, height);
-        if (!projection) return;
-        const coverage = displayedRef.current.get(cell.id) ?? cell.coverage;
-        const opacity = coverageOpacity(coverage);
-        if (opacity <= 0) return;
-        context.fillStyle = `rgba(28, 157, 237, ${opacity})`;
-        context.fillRect(projection.left, projection.top, projection.width, projection.height);
-        if (coverage < 0.9) {
-          context.strokeStyle = `rgba(152, 231, 255, ${Math.max(.12, opacity * .72)})`;
-          context.lineWidth = 0.7;
-          context.strokeRect(projection.left, projection.top, projection.width, projection.height);
+      const maskWidth = Math.min(180, Math.max(96, Math.round(width / 3)));
+      const maskHeight = Math.max(64, Math.round(maskWidth * height / Math.max(width, 1)));
+      if (maskCanvas.width !== maskWidth || maskCanvas.height !== maskHeight) {
+        maskCanvas.width = maskWidth;
+        maskCanvas.height = maskHeight;
+      }
+      const maskContext = maskCanvas.getContext('2d');
+      if (!maskContext) {
+        context.restore();
+        return;
+      }
+      const image = maskContext.createImageData(maskWidth, maskHeight);
+      for (let y = 0; y < maskHeight; y += 1) {
+        for (let x = 0; x < maskWidth; x += 1) {
+          const coverage = sampleCoverage(x / Math.max(maskWidth - 1, 1), y / Math.max(maskHeight - 1, 1));
+          const alpha = Math.round(coverageOpacity(coverage) * 255);
+          const index = (y * maskWidth + x) * 4;
+          image.data[index] = 25;
+          image.data[index + 1] = 151;
+          image.data[index + 2] = 235;
+          image.data[index + 3] = alpha;
         }
-      });
-      context.restore();
-    };
-
-    const drawMappedWireframe = (context, width, height) => {
-      if (!mappingReady) return;
-      context.save();
-      cells.forEach((cell) => {
-        const coverage = displayedRef.current.get(cell.id) ?? cell.coverage;
-        if (coverage < 0.2) return;
-        const projection = projectCell(cell, width, height);
-        if (!projection) return;
-
-        // This is a confidence-linked directional scaffold, not fabricated room mesh.
-        // It gives the user spatial feedback until real triangulated geometry is available.
-        const insetX = projection.width * 0.1;
-        const insetY = projection.height * 0.12;
-        const depthX = projection.width * 0.08;
-        const depthY = projection.height * 0.09;
-        const front = [
-          { x: projection.left, y: projection.top },
-          { x: projection.right, y: projection.top },
-          { x: projection.right, y: projection.bottom },
-          { x: projection.left, y: projection.bottom },
-        ];
-        const back = front.map((point) => ({
-          x: point.x + (point.x < width / 2 ? insetX : -insetX) + depthX,
-          y: point.y + insetY - depthY,
-        }));
-        const alpha = Math.min(0.72, 0.22 + coverage * 0.62);
-        context.strokeStyle = `rgba(209, 247, 255, ${alpha})`;
-        context.lineWidth = coverage >= 0.66 ? 1.1 : 0.8;
-
-        const drawLoop = (points) => {
-          context.beginPath();
-          points.forEach((point, index) => {
-            if (index === 0) context.moveTo(point.x, point.y);
-            else context.lineTo(point.x, point.y);
-          });
-          context.closePath();
-          context.stroke();
-        };
-        drawLoop(front);
-        drawLoop(back);
-        front.forEach((point, index) => {
-          context.beginPath();
-          context.moveTo(point.x, point.y);
-          context.lineTo(back[index].x, back[index].y);
-          context.stroke();
-        });
-      });
+      }
+      maskContext.putImageData(image, 0, 0);
+      context.imageSmoothingEnabled = true;
+      context.filter = 'blur(8px)';
+      context.drawImage(maskCanvas, 0, 0, width, height);
       context.restore();
     };
 
@@ -331,13 +321,7 @@ function CoverageCanvas({
         displayedRef.current.set(cell.id, Math.abs(coverageTarget - next) < 0.002 ? coverageTarget : next);
       });
 
-      if (parallax > 0.04) {
-        context.fillStyle = `rgba(169, 233, 255, ${Math.min(0.08, parallax * 0.18)})`;
-        context.fillRect(0, 0, width, height);
-      }
-
-      drawCoverageRegions(context, width, height);
-      drawMappedWireframe(context, width, height);
+      drawCoverageMask(context, width, height);
       drawTrackedFeatures(context, width, height);
       drawGeometry(context, width, height);
       frameId = window.requestAnimationFrame(draw);
