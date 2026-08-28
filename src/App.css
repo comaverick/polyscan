@@ -636,3 +636,41 @@ button { font: inherit; }
   .viewer-timeline-wrap { bottom: 70px; }
   .viewer-bottom-nav button { flex-direction: column; gap: 3px; }
 }
+
+.coverage-map-card {
+  position: absolute;
+  top: max(124px, calc(env(safe-area-inset-top) + 112px));
+  left: 16px;
+  z-index: 5;
+  width: 174px;
+  padding: 11px 11px 9px;
+  border: 1px solid rgba(220, 244, 255, .18);
+  border-radius: 15px;
+  background: rgba(5, 12, 20, .58);
+  box-shadow: 0 14px 35px rgba(0, 0, 0, .18);
+  backdrop-filter: blur(18px);
+}
+
+.coverage-map-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.coverage-map-header div { display: flex; flex-direction: column; gap: 3px; }
+.coverage-map-kicker { color: rgba(196, 224, 244, .5); font-size: 8px; letter-spacing: .12em; text-transform: uppercase; }
+.coverage-map-header strong { color: rgba(240, 250, 255, .9); font-size: 10px; font-weight: 650; }
+.coverage-map-percent { color: #c7f4ff !important; font-size: 17px !important; font-weight: 520 !important; letter-spacing: -.03em; }
+.coverage-map-grid { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); grid-auto-rows: 5px; gap: 3px; padding: 8px 7px; border: 1px solid rgba(205, 236, 255, .1); border-radius: 9px; background: rgba(12, 32, 50, .56); }
+.coverage-map-cell { display: block; min-width: 0; border: 1px solid rgba(166, 219, 244, .17); border-radius: 2px; background: rgba(133, 193, 225, .1); transition: background .2s ease, box-shadow .2s ease, border-color .2s ease; }
+.coverage-map-cell.coverage-low { border-color: rgba(143, 220, 247, .3); background: rgba(96, 196, 240, .25); }
+.coverage-map-cell.coverage-partial { border-color: rgba(180, 238, 255, .62); background: rgba(132, 223, 255, .55); box-shadow: 0 0 6px rgba(119, 215, 255, .22); }
+.coverage-map-cell.coverage-good,
+.coverage-map-cell.coverage-sufficient { border-color: rgba(232, 253, 255, .88); background: #c7f5ff; box-shadow: 0 0 7px rgba(141, 226, 255, .6); }
+.coverage-map-cell.is-current { outline: 1px solid rgba(255, 255, 255, .86); outline-offset: 1px; }
+.coverage-map-footer { display: flex; justify-content: space-between; gap: 7px; margin-top: 9px; color: rgba(211, 232, 246, .55); font-size: 8px; }
+.coverage-map-footer span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.coverage-legend-dot { display: inline-block; width: 5px; height: 5px; border: 1px solid rgba(202, 244, 255, .7); border-radius: 2px; }
+.coverage-legend-dot.is-filled { background: #c7f5ff; box-shadow: 0 0 6px rgba(141, 226, 255, .5); }
+.coverage-legend-dot.is-current { background: rgba(137, 210, 244, .25); outline: 1px solid rgba(255, 255, 255, .76); outline-offset: 1px; }
+
+@media (max-width: 700px) {
+  .coverage-map-card { top: max(122px, calc(env(safe-area-inset-top) + 108px)); left: 13px; width: 158px; padding: 10px 9px 8px; }
+  .coverage-map-grid { gap: 2px; padding: 7px 5px; }
+  .coverage-map-footer { font-size: 7px; }
+}

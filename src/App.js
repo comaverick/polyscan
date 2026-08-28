@@ -246,8 +246,15 @@ function CoverageCanvas({
 
           const coverage = displayedRef.current.get(cell.id) ?? 0;
           const opacity = coverageOpacity(coverage);
-          context.fillStyle = `rgba(37, 105, 255, ${opacity})`;
+          const mapped = coverage >= 0.2;
+          const inCurrentView = Math.abs(yawDelta) <= 45 && Math.abs(pitchCenter - view.pitch) <= 34;
+          context.fillStyle = `rgba(76, 196, 255, ${mapped ? Math.min(0.1, opacity * 0.18) : 0.012})`;
           context.fillRect(x - cellWidth / 2, y - cellHeight / 2, cellWidth, cellHeight);
+          context.strokeStyle = `rgba(205, 246, 255, ${mapped ? 0.42 : inCurrentView ? 0.2 : 0.08})`;
+          context.lineWidth = mapped ? 1.15 : 0.7;
+          context.setLineDash(mapped ? [] : [3, 5]);
+          context.strokeRect(x - cellWidth / 2, y - cellHeight / 2, cellWidth, cellHeight);
+          context.setLineDash([]);
         });
       }
 
@@ -272,6 +279,36 @@ function CoverageCanvas({
   }, [cells, mappingReady, parallax, sparsePoints, stableFeatures, surfacePatches, view]);
 
   return <canvas ref={canvasRef} className="coverage-canvas" data-coverage-state={mappingReady ? 'directional' : 'initial-blue'} aria-hidden="true" />;
+}
+
+function CoverageMap({ cells, view }) {
+  const visibleIds = new Set(getVisibleCellIds({ yaw: view.yaw, pitch: view.pitch, yawBins: 20 }));
+  const scannedCells = cells.filter((cell) => cell.coverage >= 0.2).length;
+  const strongCells = cells.filter((cell) => cell.coverage >= 0.66).length;
+  const percentage = cells.length ? Math.round((scannedCells / cells.length) * 100) : 0;
+
+  return (
+    <aside className="coverage-map-card" aria-label={`Scan coverage ${percentage} percent`}>
+      <div className="coverage-map-header">
+        <div><span className="coverage-map-kicker">Room map</span><strong>Scan coverage</strong></div>
+        <strong className="coverage-map-percent">{percentage}%</strong>
+      </div>
+      <div className="coverage-map-grid">
+        {cells.map((cell) => (
+          <span
+            key={cell.id}
+            className={`coverage-map-cell coverage-${cell.status || 'unknown'}${visibleIds.has(cell.id) ? ' is-current' : ''}`}
+            style={{ '--coverage': cell.coverage }}
+            title={`${cell.status || 'unknown'} scan zone`}
+          />
+        ))}
+      </div>
+      <div className="coverage-map-footer">
+        <span><i className="coverage-legend-dot is-filled" /> {strongCells} mapped</span>
+        <span><i className="coverage-legend-dot is-current" /> current view</span>
+      </div>
+    </aside>
+  );
 }
 
 function RoomModelCanvas({ rotation, zoom, frameIndex }) {
@@ -734,6 +771,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         <span>{statusLabel}</span>
         <span className="scan-frame-count">{String(keyframeCount).padStart(3, '0')} frames</span>
       </div>
+      <CoverageMap cells={scanState.directionalCoverage} view={view} />
 
       <div className="scan-bottom-ui scan-reference-bottom">
         <div className="scan-guidance" role="status" aria-live="polite">
