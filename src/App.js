@@ -204,12 +204,11 @@ function CoverageCanvas({
 
           const cellYaw = cell.yawIndex * yawSize + yawSize / 2;
           const yawDelta = ((cellYaw - view.yaw + 540) % 360) - 180;
-          const pitchSize = 46;
           const pitchCenter = cell.pitchBand === 0 ? 24 : cell.pitchBand === 1 ? 0 : -24;
-          const x = width / 2 + (yawDelta / 82) * width;
+          const x = width / 2 + (yawDelta / 78) * width;
           const y = height / 2 - ((pitchCenter - view.pitch) / 58) * height;
-          const cellWidth = width * (yawSize / 82) * 1.08;
-          const cellHeight = height * (pitchSize / 58) * 1.08;
+          const cellWidth = width * (yawSize / 78) * 1.01;
+          const cellHeight = height / 3.02;
           if (x + cellWidth < 0 || x - cellWidth > width || y + cellHeight < 0 || y - cellHeight > height) return;
 
           const coverage = displayedRef.current.get(cell.id) ?? 0;
@@ -293,10 +292,21 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
   const scanRef = useRef(createEmptyScanState());
   const [view, setView] = useState({ yaw: 0, pitch: 0 });
   const [orientation, setOrientation] = useState({ yaw: 0, pitch: 0 });
-  const [mapVersion, setMapVersion] = useState(0);
   const [cameraState, setCameraState] = useState('starting');
   const [trackingState, setTrackingState] = useState('searching');
   const [cameraMessage, setCameraMessage] = useState('Starting camera');
+  const [captureState, setCaptureState] = useState('waiting');
+
+  const resumeCamera = useCallback(() => {
+    const video = videoRef.current;
+    if (!video || !video.paused) return;
+    try {
+      const playAttempt = video.play();
+      if (playAttempt?.catch) playAttempt.catch(() => {});
+    } catch {
+      // Some test environments expose a video element without media playback.
+    }
+  }, []);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -329,7 +339,10 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+          const playAttempt = videoRef.current.play();
+          if (playAttempt?.catch) {
+            playAttempt.catch(() => setCameraMessage('Tap the preview to start'));
+          }
         }
         setCameraState('live');
         setCameraMessage('Camera live');
@@ -376,6 +389,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
       canvas.width = ANALYSIS_WIDTH;
       canvas.height = ANALYSIS_HEIGHT;
       context.drawImage(video, 0, 0, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
+      setCaptureState('frames');
       const currentFrame = {
         width: ANALYSIS_WIDTH,
         height: ANALYSIS_HEIGHT,
@@ -430,7 +444,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
       onScanStateChange(nextState);
       setTrackingState(evidence.tracking ? 'tracking' : current.lastFrame ? 'lost' : 'searching');
       setView({ yaw: orientation.yaw, pitch: orientation.pitch });
-      setMapVersion((version) => version + 1);
     };
 
     const timer = window.setInterval(captureFrame, CAPTURE_INTERVAL_MS);
@@ -451,7 +464,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
     : trackingState === 'lost'
       ? 'Look at a scanned area'
       : mappingReady
-        ? 'Scan the blue areas'
+        ? 'Move sideways'
         : 'Move around the room';
   const statusLabel = trackingState === 'lost'
     ? 'Tracking lost'
@@ -459,11 +472,13 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
       ? 'Preview only'
       : trackingState === 'tracking'
         ? 'Tracking'
-        : 'Searching';
+        : captureState === 'frames'
+          ? 'Camera live'
+          : 'Starting camera';
 
   return (
-    <main className="scan-screen">
-      <video ref={videoRef} className="camera-video" autoPlay playsInline muted aria-label="Live room camera" />
+    <main className="scan-screen" onPointerDown={resumeCamera}>
+      <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} aria-label="Live room camera" />
       <CameraPlaceholder />
       <CoverageCanvas
         cells={scanState.directionalCoverage}
@@ -521,7 +536,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
           <span>Open PolyScan on HTTPS and allow camera access.</span>
         </div>
       )}
-      <span className="capture-note" aria-hidden="true">{mapVersion > 0 && 'Local map active'}</span>
+      <span className="capture-note" role="status">{mappingReady ? 'Mapping active' : captureState === 'frames' ? 'Camera frames active' : ''}</span>
     </main>
   );
 }
