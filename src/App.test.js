@@ -16,6 +16,13 @@ test('opens the camera surface with an initial blue state and disabled Done acti
   expect(document.querySelector('.coverage-canvas')).toHaveAttribute('data-coverage-state', 'initial-blue');
 });
 
+test('does not silently stay on starting camera when camera access is unavailable', () => {
+  render(<App />);
+  fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
+  expect(screen.getByRole('alert')).toHaveTextContent(/camera access is needed/i);
+  expect(screen.getByText(/preview only/i)).toBeInTheDocument();
+});
+
 test('pause stops capture controls without removing the live camera surface', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));

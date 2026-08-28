@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
 import {
   DEFAULT_VIEWPOINT_THRESHOLDS,
@@ -285,16 +285,13 @@ function LaunchScreen({ onStart }) {
   );
 }
 
-function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
+function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, onRetryCamera }) {
   const videoRef = useRef(null);
   const analysisCanvasRef = useRef(null);
-  const streamRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
   const [view, setView] = useState({ yaw: 0, pitch: 0 });
   const [orientation, setOrientation] = useState({ yaw: 0, pitch: 0 });
-  const [cameraState, setCameraState] = useState('starting');
   const [trackingState, setTrackingState] = useState('searching');
-  const [cameraMessage, setCameraMessage] = useState('Starting camera');
   const [captureState, setCaptureState] = useState('waiting');
 
   const resumeCamera = useCallback(() => {
@@ -308,58 +305,16 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
     }
   }, []);
 
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-  }, []);
-
   useEffect(() => {
-    let mounted = true;
-    const requestCamera = async () => {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setCameraState('unavailable');
-        setCameraMessage('Camera preview unavailable');
-        return;
-      }
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: { ideal: 'environment' },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-          },
-        });
-        if (!mounted) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          const playAttempt = videoRef.current.play();
-          if (playAttempt?.catch) {
-            playAttempt.catch(() => setCameraMessage('Tap the preview to start'));
-          }
-        }
-        setCameraState('live');
-        setCameraMessage('Camera live');
-      } catch (error) {
-        if (mounted) {
-          setCameraState('unavailable');
-          setCameraMessage('Camera preview unavailable');
-        }
-      }
-    };
-
-    requestCamera();
+    const video = videoRef.current;
+    if (!video || !cameraStream) return undefined;
+    video.srcObject = cameraStream;
+    resumeCamera();
     return () => {
-      mounted = false;
-      stopCamera();
+      video.pause();
+      if (video.srcObject === cameraStream) video.srcObject = null;
     };
-  }, [stopCamera]);
+  }, [cameraStream, resumeCamera]);
 
   useEffect(() => {
     if (!window.DeviceOrientationEvent) return undefined;
@@ -466,10 +421,21 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
       : mappingReady
         ? 'Move sideways'
         : 'Move around the room';
+  const cameraMessage = cameraState === 'unavailable'
+    ? 'Camera preview unavailable'
+    : cameraState === 'blocked'
+      ? 'Camera permission is waiting'
+      : cameraState === 'requesting'
+        ? 'Allow camera access'
+        : cameraState === 'live'
+          ? 'Camera live'
+          : 'Starting camera';
   const statusLabel = trackingState === 'lost'
     ? 'Tracking lost'
-    : cameraState === 'unavailable'
+    : cameraState === 'unavailable' || cameraState === 'blocked'
       ? 'Preview only'
+      : cameraState === 'requesting'
+        ? 'Allow camera'
       : trackingState === 'tracking'
         ? 'Tracking'
         : captureState === 'frames'
@@ -530,10 +496,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
           </button>
         </div>
       </div>
-      {cameraState === 'unavailable' && (
+      {(cameraState === 'unavailable' || cameraState === 'blocked' || cameraState === 'requesting') && (
         <div className="camera-warning" role="alert">
-          <strong>Camera access is needed for live coverage.</strong>
-          <span>Open PolyScan on HTTPS and allow camera access.</span>
+          <strong>{cameraState === 'requesting' ? 'Allow camera access to begin mapping.' : 'Camera access is needed for live coverage.'}</strong>
+          <span>{cameraState === 'requesting' ? 'Choose Allow in the browser prompt.' : 'Open PolyScan on HTTPS and allow camera access.'}</span>
+          {cameraState === 'unavailable' && <button type="button" onClick={onRetryCamera}>Retry camera</button>}
         </div>
       )}
       <span className="capture-note" role="status">{mappingReady ? 'Mapping active' : captureState === 'frames' ? 'Camera frames active' : ''}</span>
@@ -585,39 +552,98 @@ function App() {
   const [paused, setPaused] = useState(false);
   const [scanState, setScanState] = useState(createEmptyScanState);
   const [selectedKeyframes, setSelectedKeyframes] = useState([]);
+  const [cameraStream, setCameraStream] = useState(null);
+  const [cameraState, setCameraState] = useState('idle');
+  const cameraRequestRef = useRef(null);
+  const cameraSessionRef = useRef(0);
+
+  const stopCamera = useCallback(() => {
+    setCameraStream((stream) => {
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      return null;
+    });
+  }, []);
+
+  const requestCamera = useCallback((sessionId) => {
+    if (cameraRequestRef.current) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setCameraState('unavailable');
+      return;
+    }
+    setCameraState('requesting');
+    let request;
+    try {
+      request = navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+      });
+    } catch {
+      setCameraState('unavailable');
+      return;
+    }
+    cameraRequestRef.current = request;
+    const timeout = window.setTimeout(() => {
+      if (cameraRequestRef.current === request && cameraSessionRef.current === sessionId) setCameraState('blocked');
+    }, 6000);
+    request.then((stream) => {
+      window.clearTimeout(timeout);
+      cameraRequestRef.current = null;
+      if (cameraSessionRef.current !== sessionId) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      setCameraStream(stream);
+      setCameraState('live');
+    }).catch(() => {
+      window.clearTimeout(timeout);
+      cameraRequestRef.current = null;
+      if (cameraSessionRef.current === sessionId) setCameraState('unavailable');
+    });
+  }, []);
 
   const startScan = () => {
+    cameraSessionRef.current += 1;
+    stopCamera();
+    setCameraState('requesting');
     if (typeof window.DeviceOrientationEvent?.requestPermission === 'function') {
       window.DeviceOrientationEvent.requestPermission().catch(() => {});
     }
     setScanState(createEmptyScanState());
     setPaused(false);
     setScreen('scan');
+    requestCamera(cameraSessionRef.current);
   };
 
   const finishScan = (keyframes) => {
+    cameraSessionRef.current += 1;
+    stopCamera();
+    setCameraState('idle');
     setSelectedKeyframes(keyframes);
     setScreen('review');
   };
 
-  const activeScreen = useMemo(() => {
-    if (screen === 'launch') return <LaunchScreen onStart={startScan} />;
-    if (screen === 'scan') {
-      return (
-        <ScanScreen
-          scanState={scanState}
-          paused={paused}
-          onPause={() => setPaused((value) => !value)}
-          onDone={finishScan}
-          onScanStateChange={setScanState}
-        />
-      );
-    }
-    if (screen === 'review') {
-      return <ReviewScreen selectedKeyframes={selectedKeyframes} onProcess={() => setScreen('processing')} onScanAgain={startScan} />;
-    }
-    return <ProcessingScreen onBack={() => setScreen('launch')} />;
-  }, [paused, scanState, screen, selectedKeyframes]);
+  let activeScreen;
+  if (screen === 'launch') activeScreen = <LaunchScreen onStart={startScan} />;
+  else if (screen === 'scan') {
+    activeScreen = (
+      <ScanScreen
+        scanState={scanState}
+        paused={paused}
+        cameraStream={cameraStream}
+        cameraState={cameraState}
+        onPause={() => setPaused((value) => !value)}
+        onDone={finishScan}
+        onRetryCamera={() => requestCamera(cameraSessionRef.current)}
+        onScanStateChange={setScanState}
+      />
+    );
+  } else if (screen === 'review') {
+    activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} onProcess={() => setScreen('processing')} onScanAgain={startScan} />;
+  } else activeScreen = <ProcessingScreen onBack={() => setScreen('launch')} />;
 
   return <div className="App">{activeScreen}</div>;
 }
