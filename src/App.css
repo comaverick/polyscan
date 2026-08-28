@@ -786,6 +786,10 @@ button { font: inherit; }
 .build-back-link { position: absolute; bottom: max(24px, env(safe-area-inset-bottom)); left: 50%; border: 0; background: transparent; color: rgba(201, 225, 239, .6); cursor: pointer; font-size: 11px; transform: translateX(-50%); }
 .build-back-link:hover { color: #effaff; }
 
+@media (prefers-reduced-motion: reduce) {
+  .build-scan-line { animation: none; }
+}
+
 @media (max-width: 700px) {
   .build-header { padding-right: 13px; padding-left: 13px; }
   .build-content { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 26px; min-height: calc(100dvh - 68px); padding: 26px 18px 80px; }
@@ -796,3 +800,8 @@ button { font: inherit; }
   .build-copy .primary-action { width: 100%; }
   .capture-warning { right: 13px; bottom: 116px; left: 13px; max-width: none; }
 }
+
+/* The map echoes the point cloud. It stays readable without turning the camera into a grid. */
+.coverage-map-cell { width: 6px; height: 6px; justify-self: center; align-self: center; border-radius: 50%; }
+.coverage-map-cell.is-current { outline: 1px solid rgba(255, 255, 255, .9); outline-offset: 2px; }
+.coverage-legend-dot.is-unscanned { border-color: rgba(78, 191, 255, .92); background: #37b8ff; box-shadow: 0 0 7px rgba(55, 184, 255, .75); }

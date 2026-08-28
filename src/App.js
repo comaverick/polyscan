@@ -25,6 +25,11 @@ const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
 
+function deterministicNoise(value) {
+  const sample = Math.sin(value * 12.9898) * 43758.5453;
+  return sample - Math.floor(sample);
+}
+
 const createEmptyScanState = () => ({
   directionalCoverage: createDirectionalCoverage(),
   cameraKeyframes: [],
@@ -207,6 +212,44 @@ function CoverageCanvas({
       context.restore();
     };
 
+    const drawUnscannedPixels = (context, width, height) => {
+      const yawBins = cells[0]?.yawBins || 20;
+      const yawSize = 360 / yawBins;
+      const now = performance.now();
+      context.save();
+      context.globalCompositeOperation = 'screen';
+      cells.forEach((cell, cellIndex) => {
+        const coverage = displayedRef.current.get(cell.id) ?? cell.coverage;
+        const missing = 1 - coverage;
+        if (missing < 0.08) return;
+
+        const cellYaw = cell.yawIndex * yawSize + yawSize / 2;
+        const yawDelta = ((cellYaw - view.yaw + 540) % 360) - 180;
+        const pitchCenter = cell.pitchBand === 0 ? 24 : cell.pitchBand === 1 ? 0 : -24;
+        const inCurrentView = Math.abs(yawDelta) <= 45 && Math.abs(pitchCenter - view.pitch) <= 34;
+        if (!inCurrentView) return;
+
+        const centerX = width / 2 + (yawDelta / 78) * width;
+        const centerY = height / 2 - ((pitchCenter - view.pitch) / 58) * height;
+        const cellWidth = width * (yawSize / 78) * 1.01;
+        const cellHeight = height / 3.02;
+        if (centerX + cellWidth / 2 < 0 || centerX - cellWidth / 2 > width || centerY + cellHeight / 2 < 0 || centerY - cellHeight / 2 > height) return;
+
+        const pixelCount = Math.round(9 + missing * 25);
+        const baseOpacity = Math.min(0.78, Math.max(0.15, coverageOpacity(coverage) + missing * 0.16));
+        for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
+          const seed = cellIndex * 101 + pixelIndex * 17;
+          const x = centerX - cellWidth / 2 + deterministicNoise(seed + 1) * cellWidth;
+          const y = centerY - cellHeight / 2 + deterministicNoise(seed + 2) * cellHeight;
+          const flicker = 0.78 + Math.sin(now / 260 + seed) * 0.22;
+          const size = pixelIndex % 7 === 0 ? 2 : 1;
+          context.fillStyle = `rgba(55, 184, 255, ${baseOpacity * flicker})`;
+          context.fillRect(Math.round(x), Math.round(y), size, size);
+        }
+      });
+      context.restore();
+    };
+
     const draw = () => {
       if (!active) return;
       const rect = canvas.getBoundingClientRect();
@@ -226,41 +269,19 @@ function CoverageCanvas({
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, width, height);
 
-      if (mappingReady) {
-        const yawBins = cells[0]?.yawBins || 20;
-        const yawSize = 360 / yawBins;
-        cells.forEach((cell) => {
-          const coverageTarget = coverageTargetsRef.current.get(cell.id) ?? cell.coverage;
-          const current = displayedRef.current.get(cell.id) ?? 0;
-          const next = current + (coverageTarget - current) * 0.14;
-          displayedRef.current.set(cell.id, Math.abs(coverageTarget - next) < 0.002 ? coverageTarget : next);
-
-          const cellYaw = cell.yawIndex * yawSize + yawSize / 2;
-          const yawDelta = ((cellYaw - view.yaw + 540) % 360) - 180;
-          const pitchCenter = cell.pitchBand === 0 ? 24 : cell.pitchBand === 1 ? 0 : -24;
-          const x = width / 2 + (yawDelta / 78) * width;
-          const y = height / 2 - ((pitchCenter - view.pitch) / 58) * height;
-          const cellWidth = width * (yawSize / 78) * 1.01;
-          const cellHeight = height / 3.02;
-          if (x + cellWidth < 0 || x - cellWidth > width || y + cellHeight < 0 || y - cellHeight > height) return;
-
-          const coverage = displayedRef.current.get(cell.id) ?? 0;
-          const opacity = coverageOpacity(coverage);
-          const mapped = coverage >= 0.2;
-          const inCurrentView = Math.abs(yawDelta) <= 45 && Math.abs(pitchCenter - view.pitch) <= 34;
-          if (mapped && inCurrentView) {
-            context.strokeStyle = `rgba(205, 246, 255, ${Math.min(0.28, opacity + 0.12)})`;
-            context.lineWidth = 1;
-            context.strokeRect(x - cellWidth / 2, y - cellHeight / 2, cellWidth, cellHeight);
-          }
-        });
-      }
+      cells.forEach((cell) => {
+        const coverageTarget = coverageTargetsRef.current.get(cell.id) ?? cell.coverage;
+        const current = displayedRef.current.get(cell.id) ?? 0;
+        const next = current + (coverageTarget - current) * 0.14;
+        displayedRef.current.set(cell.id, Math.abs(coverageTarget - next) < 0.002 ? coverageTarget : next);
+      });
 
       if (parallax > 0.04) {
         context.fillStyle = `rgba(169, 233, 255, ${Math.min(0.08, parallax * 0.18)})`;
         context.fillRect(0, 0, width, height);
       }
 
+      drawUnscannedPixels(context, width, height);
       drawTrackedFeatures(context, width, height);
       drawGeometry(context, width, height);
       frameId = window.requestAnimationFrame(draw);
@@ -289,12 +310,12 @@ function CoverageMap({ cells, view, recording, paused, trackingState }) {
     : trackingState === 'lost'
       ? 'Aim at an edge or corner'
       : !recording
-        ? 'Tap record to begin'
+        ? 'Tap record. Blue pixels mark areas to capture'
         : !scannedCells
-          ? 'Move slowly until zones light up'
+          ? 'Move slowly. Blue pixels show what is still unscanned'
           : visibleUnscanned
-            ? `${visibleUnscanned} new zones in view`
-            : 'Turn toward a gray zone';
+            ? `${visibleUnscanned} areas still need capture`
+            : 'Turn toward the blue pixels';
   const pitchLabels = ['Ceiling', 'Walls', 'Floor'];
 
   return (
@@ -322,8 +343,8 @@ function CoverageMap({ cells, view, recording, paused, trackingState }) {
       </div>
       <div className="coverage-map-hint"><span className="coverage-map-hint-icon">+</span><span>{hint}</span></div>
       <div className="coverage-map-footer">
+        <span><i className="coverage-legend-dot is-unscanned" /> to capture</span>
         <span><i className="coverage-legend-dot is-filled" /> scanned</span>
-        <span><i className="coverage-legend-dot is-current" /> current view</span>
       </div>
     </aside>
   );
