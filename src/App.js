@@ -219,14 +219,7 @@ function CoverageCanvas({
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, width, height);
 
-      if (!mappingReady) {
-        const initialWash = context.createLinearGradient(0, 0, width, height);
-        initialWash.addColorStop(0, 'rgba(24, 93, 246, 0.46)');
-        initialWash.addColorStop(0.55, 'rgba(33, 115, 255, 0.56)');
-        initialWash.addColorStop(1, 'rgba(19, 62, 188, 0.48)');
-        context.fillStyle = initialWash;
-        context.fillRect(0, 0, width, height);
-      } else {
+      if (mappingReady) {
         const yawBins = cells[0]?.yawBins || 20;
         const yawSize = 360 / yawBins;
         cells.forEach((cell) => {
@@ -248,13 +241,11 @@ function CoverageCanvas({
           const opacity = coverageOpacity(coverage);
           const mapped = coverage >= 0.2;
           const inCurrentView = Math.abs(yawDelta) <= 45 && Math.abs(pitchCenter - view.pitch) <= 34;
-          context.fillStyle = `rgba(76, 196, 255, ${mapped ? Math.min(0.1, opacity * 0.18) : 0.012})`;
-          context.fillRect(x - cellWidth / 2, y - cellHeight / 2, cellWidth, cellHeight);
-          context.strokeStyle = `rgba(205, 246, 255, ${mapped ? 0.42 : inCurrentView ? 0.2 : 0.08})`;
-          context.lineWidth = mapped ? 1.15 : 0.7;
-          context.setLineDash(mapped ? [] : [3, 5]);
-          context.strokeRect(x - cellWidth / 2, y - cellHeight / 2, cellWidth, cellHeight);
-          context.setLineDash([]);
+          if (mapped && inCurrentView) {
+            context.strokeStyle = `rgba(205, 246, 255, ${Math.min(0.28, opacity + 0.12)})`;
+            context.lineWidth = 1;
+            context.strokeRect(x - cellWidth / 2, y - cellHeight / 2, cellWidth, cellHeight);
+          }
         });
       }
 
@@ -281,37 +272,57 @@ function CoverageCanvas({
   return <canvas ref={canvasRef} className="coverage-canvas" data-coverage-state={mappingReady ? 'directional' : 'initial-blue'} aria-hidden="true" />;
 }
 
-function CoverageMap({ cells, view }) {
+function CoverageMap({ cells, view, recording, paused, trackingState }) {
   const visibleIds = new Set(getVisibleCellIds({ yaw: view.yaw, pitch: view.pitch, yawBins: 20 }));
   const scannedCells = cells.filter((cell) => cell.coverage >= 0.2).length;
-  const strongCells = cells.filter((cell) => cell.coverage >= 0.66).length;
   const percentage = cells.length ? Math.round((scannedCells / cells.length) * 100) : 0;
+  const visibleUnscanned = cells.filter((cell) => visibleIds.has(cell.id) && cell.coverage < 0.2).length;
+  const hint = paused
+    ? 'Scan paused'
+    : trackingState === 'lost'
+      ? 'Aim at an edge or corner'
+      : !recording
+        ? 'Tap record to begin'
+        : !scannedCells
+          ? 'Move slowly until zones light up'
+          : visibleUnscanned
+            ? `${visibleUnscanned} new zones in view`
+            : 'Turn toward a gray zone';
+  const pitchLabels = ['Ceiling', 'Walls', 'Floor'];
 
   return (
-    <aside className="coverage-map-card" aria-label={`Scan coverage ${percentage} percent`}>
+    <aside className="coverage-map-card" aria-label={`Room coverage ${percentage} percent, ${scannedCells} of ${cells.length} areas mapped`}>
       <div className="coverage-map-header">
-        <div><span className="coverage-map-kicker">Room map</span><strong>Scan coverage</strong></div>
-        <strong className="coverage-map-percent">{percentage}%</strong>
+        <div><span className="coverage-map-kicker">Room coverage</span><strong>{percentage}% scanned</strong></div>
+        <div className="coverage-map-count"><strong>{scannedCells}</strong><span>of {cells.length} areas</span></div>
       </div>
-      <div className="coverage-map-grid">
-        {cells.map((cell) => (
-          <span
-            key={cell.id}
-            className={`coverage-map-cell coverage-${cell.status || 'unknown'}${visibleIds.has(cell.id) ? ' is-current' : ''}`}
-            style={{ '--coverage': cell.coverage }}
-            title={`${cell.status || 'unknown'} scan zone`}
-          />
+      <div className="coverage-map-surfaces">
+        {pitchLabels.map((label, pitchBand) => (
+          <div className="coverage-map-surface" key={label}>
+            <span className="coverage-map-surface-label">{label}</span>
+            <div className="coverage-map-grid">
+              {cells.filter((cell) => cell.pitchBand === pitchBand).map((cell) => (
+                <span
+                  key={cell.id}
+                  className={`coverage-map-cell coverage-${cell.status || 'unknown'}${visibleIds.has(cell.id) ? ' is-current' : ''}`}
+                  style={{ '--coverage': cell.coverage }}
+                  title={`${cell.status || 'unknown'} scan zone`}
+                />
+              ))}
+            </div>
+          </div>
         ))}
       </div>
+      <div className="coverage-map-hint"><span className="coverage-map-hint-icon">+</span><span>{hint}</span></div>
       <div className="coverage-map-footer">
-        <span><i className="coverage-legend-dot is-filled" /> {strongCells} mapped</span>
+        <span><i className="coverage-legend-dot is-filled" /> scanned</span>
         <span><i className="coverage-legend-dot is-current" /> current view</span>
       </div>
     </aside>
   );
 }
 
-function RoomModelCanvas({ rotation, zoom, frameIndex }) {
+function RoomModelCanvas({ rotation, zoom, frameIndex, hasCapture }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -329,17 +340,23 @@ function RoomModelCanvas({ rotation, zoom, frameIndex }) {
       if (!context) return;
       context.setTransform(ratio, 0, 0, ratio, 0, 0);
 
-      const background = context.createLinearGradient(0, 0, 0, height);
-      background.addColorStop(0, '#111b2a');
-      background.addColorStop(0.54, '#172a43');
-      background.addColorStop(1, '#07111f');
-      context.fillStyle = background;
-      context.fillRect(0, 0, width, height);
-      const glow = context.createRadialGradient(width * 0.52, height * 0.36, 4, width * 0.52, height * 0.36, width * 0.66);
-      glow.addColorStop(0, 'rgba(79, 174, 255, .22)');
-      glow.addColorStop(1, 'rgba(79, 174, 255, 0)');
-      context.fillStyle = glow;
-      context.fillRect(0, 0, width, height);
+      context.clearRect(0, 0, width, height);
+      if (!hasCapture) {
+        const background = context.createLinearGradient(0, 0, 0, height);
+        background.addColorStop(0, '#111b2a');
+        background.addColorStop(0.54, '#172a43');
+        background.addColorStop(1, '#07111f');
+        context.fillStyle = background;
+        context.fillRect(0, 0, width, height);
+        const glow = context.createRadialGradient(width * 0.52, height * 0.36, 4, width * 0.52, height * 0.36, width * 0.66);
+        glow.addColorStop(0, 'rgba(79, 174, 255, .22)');
+        glow.addColorStop(1, 'rgba(79, 174, 255, 0)');
+        context.fillStyle = glow;
+        context.fillRect(0, 0, width, height);
+      } else {
+        context.fillStyle = 'rgba(3, 12, 21, .2)';
+        context.fillRect(0, 0, width, height);
+      }
 
       const angle = (rotation * Math.PI) / 180;
       const focal = Math.min(width, height) * 0.82 * zoom;
@@ -411,9 +428,14 @@ function RoomModelCanvas({ rotation, zoom, frameIndex }) {
     };
     draw();
     const onResize = () => draw();
+    const resizeObserver = window.ResizeObserver ? new ResizeObserver(onResize) : null;
+    resizeObserver?.observe(canvas);
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, [frameIndex, rotation, zoom]);
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', onResize);
+    };
+  }, [frameIndex, hasCapture, rotation, zoom]);
 
   return <canvas ref={canvasRef} className="room-model-canvas" aria-label="Interactive room scan model" />;
 }
@@ -423,7 +445,25 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
   const [rotation, setRotation] = useState(-13);
   const [zoom, setZoom] = useState(1);
   const [activeTool, setActiveTool] = useState('mesh');
+  const [menuOpen, setMenuOpen] = useState(false);
   const dragRef = useRef(null);
+  const totalFrames = 172;
+  const activeFrameIndex = selectedKeyframes.length
+    ? Math.min(selectedKeyframes.length - 1, Math.round(((frameIndex - 1) / (totalFrames - 1)) * (selectedKeyframes.length - 1)))
+    : -1;
+  const activeFrame = activeFrameIndex >= 0 ? selectedKeyframes[activeFrameIndex] : null;
+  const captureImage = activeFrame?.thumbnail || null;
+  const showModel = activeTool !== 'camera' && activeTool !== 'video';
+  const modeCopy = {
+    mesh: ['Mesh view', 'Drag to rotate the room model'],
+    walk: ['Walk view', 'Drag across the room to look around'],
+    camera: ['Captured view', captureImage ? `Viewpoint ${activeFrameIndex + 1} of ${selectedKeyframes.length}` : 'No captured image is available'],
+    layers: ['Scan layers', 'Captured views and the room model are visible'],
+    measure: ['Measure', 'Drag the room model to inspect its surfaces'],
+    views: ['Saved views', 'Use the timeline to move between viewpoints'],
+    comment: ['Comment', 'Choose a saved viewpoint to discuss'],
+    video: ['Capture video', captureImage ? 'Showing the selected camera frame' : 'No captured image is available'],
+  }[activeTool] || ['Room model', 'Drag to rotate the room model'];
 
   const handlePointerDown = (event) => {
     event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -439,8 +479,14 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
     event.preventDefault();
     setZoom((value) => Math.max(0.78, Math.min(1.35, value - event.deltaY * 0.0008)));
   };
+  const resetViewer = () => {
+    setFrameIndex(1);
+    setRotation(-13);
+    setZoom(1);
+    setMenuOpen(false);
+  };
   const exportScan = () => {
-    const payload = JSON.stringify({ format: 'polyscan-room-viewer', frames: 172, viewpoints: selectedKeyframes.length, createdAt: new Date().toISOString() }, null, 2);
+    const payload = JSON.stringify({ format: 'polyscan-room-viewer', frames: totalFrames, viewpoints: selectedKeyframes.length, createdAt: new Date().toISOString() }, null, 2);
     const link = document.createElement('a');
     link.href = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
     link.download = 'polyscan-room-scan.json';
@@ -451,21 +497,37 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
   return (
     <main className="room-viewer-screen">
       <section className="viewer-stage" aria-label="Room viewer" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={stopDragging} onPointerCancel={stopDragging} onWheel={handleWheel}>
-        <RoomModelCanvas rotation={rotation} zoom={zoom} frameIndex={frameIndex} />
+        {captureImage && <img className="viewer-capture-image" src={captureImage} alt={`Captured room viewpoint ${activeFrameIndex + 1}`} />}
+        {showModel && <RoomModelCanvas rotation={rotation} zoom={zoom} frameIndex={frameIndex} hasCapture={Boolean(captureImage)} />}
         <div className="viewer-vignette" aria-hidden="true" />
         <div className="viewer-crosshair" aria-hidden="true"><span /></div>
-        <div className="viewer-stage-caption"><span className="scan-live-dot" /> PolyScan room model</div>
+        <div className="viewer-stage-caption"><span className="scan-live-dot" /> {modeCopy[0]}</div>
+        <div className="viewer-mode-hint"><strong>{modeCopy[0]}</strong><span>{modeCopy[1]}</span></div>
+        {!captureImage && <div className="viewer-empty-note">This scan has no saved camera image. The model preview is still interactive.</div>}
+        <div className="viewer-zoom-controls" aria-label="Room viewer zoom">
+          <button type="button" onClick={() => setZoom((value) => Math.max(0.78, value - 0.08))} aria-label="Zoom out">-</button>
+          <button type="button" onClick={resetViewer} aria-label="Reset room viewer">1:1</button>
+          <button type="button" onClick={() => setZoom((value) => Math.min(1.35, value + 0.08))} aria-label="Zoom in">+</button>
+        </div>
       </section>
 
       <header className="viewer-header">
         <button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to scan review"><Icon name="back" size={19} /></button>
         <div className="viewer-title"><strong>Room scan</strong><span>{selectedKeyframes.length || 0} viewpoints held</span></div>
         <div className="viewer-header-actions">
-          <button type="button" className="viewer-header-button" aria-label="More room scan options"><Icon name="more" size={19} /></button>
+          <button type="button" className="viewer-header-button" onClick={() => setMenuOpen((value) => !value)} aria-label="More room scan options" aria-expanded={menuOpen}><Icon name="more" size={19} /></button>
           <button type="button" className="viewer-header-button" onClick={() => { if (navigator.share) navigator.share({ title: 'PolyScan room scan' }).catch(() => {}); }} aria-label="Share room scan"><Icon name="share" size={18} /></button>
           <button type="button" className="viewer-header-button" onClick={exportScan} aria-label="Export room scan"><Icon name="download" size={18} /></button>
         </div>
       </header>
+
+      {menuOpen && (
+        <div className="viewer-menu" role="dialog" aria-label="Room viewer options">
+          <strong>Viewer options</strong>
+          <button type="button" onClick={resetViewer}>Reset view</button>
+          <button type="button" onClick={exportScan}>Export scan data</button>
+        </div>
+      )}
 
       <div className="viewer-tool-rail" aria-label="Room viewer tools">
         {[['walk', 'walk', 'Walk'], ['mesh', 'mesh', 'Mesh'], ['camera', 'camera', 'Camera'], ['layers', 'layers', 'Layers']].map(([tool, icon, label]) => (
@@ -476,14 +538,14 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
         ))}
       </div>
 
-      <div className="viewer-frame-pill"><span>Frame</span><strong>{frameIndex}</strong><span>of 172</span></div>
+      <div className="viewer-frame-pill"><span>Frame</span><strong>{frameIndex}</strong><span>of {totalFrames}</span></div>
 
       <div className="viewer-timeline-wrap">
         <button type="button" className="viewer-back-button" onClick={onBack}><Icon name="back" size={16} /><span>Back</span></button>
-        <input type="range" min="1" max="172" value={frameIndex} onChange={(event) => setFrameIndex(Number(event.target.value))} aria-label="Captured frame" />
+        <input type="range" min="1" max={totalFrames} value={frameIndex} onChange={(event) => setFrameIndex(Number(event.target.value))} aria-label="Captured frame" />
         <div className="timeline-arrows">
           <button type="button" onClick={() => setFrameIndex((value) => Math.max(1, value - 1))} aria-label="Previous frame">‹</button>
-          <button type="button" onClick={() => setFrameIndex((value) => Math.min(172, value + 1))} aria-label="Next frame">›</button>
+          <button type="button" onClick={() => setFrameIndex((value) => Math.min(totalFrames, value + 1))} aria-label="Next frame">›</button>
         </div>
       </div>
 
@@ -684,6 +746,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   }, [onScanStateChange, paused, recording, resumeCamera]);
 
   const keyframeCount = scanState.cameraKeyframes.length;
+  const scannedZoneCount = scanState.directionalCoverage.filter((cell) => cell.coverage >= 0.2).length;
   const stableTrackCount = scanState.featureTracks.filter((track) => track.observations.length >= 2).length;
   const viable = isReconstructionViable({
     keyframes: keyframeCount,
@@ -769,9 +832,15 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{String(keyframeCount).padStart(3, '0')} frames</span>
+        <span className="scan-frame-count">{scannedZoneCount} zones</span>
       </div>
-      <CoverageMap cells={scanState.directionalCoverage} view={view} />
+      <CoverageMap
+        cells={scanState.directionalCoverage}
+        view={view}
+        recording={recording}
+        paused={paused}
+        trackingState={trackingState}
+      />
 
       <div className="scan-bottom-ui scan-reference-bottom">
         <div className="scan-guidance" role="status" aria-live="polite">

@@ -669,6 +669,62 @@ button { font: inherit; }
 .coverage-legend-dot.is-filled { background: #c7f5ff; box-shadow: 0 0 6px rgba(141, 226, 255, .5); }
 .coverage-legend-dot.is-current { background: rgba(137, 210, 244, .25); outline: 1px solid rgba(255, 255, 255, .76); outline-offset: 1px; }
 
+/* The coverage card is the user's map. The camera overlay stays quiet so it does not hide the room. */
+.review-screen { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.coverage-map-card {
+  width: min(214px, calc(100vw - 28px));
+  padding: 13px 12px 10px;
+  border-color: rgba(222, 245, 255, .28);
+  border-radius: 18px;
+  background: rgba(4, 10, 17, .78);
+  box-shadow: 0 17px 42px rgba(0, 0, 0, .28);
+}
+.coverage-map-header { align-items: center; margin-bottom: 11px; }
+.coverage-map-kicker { color: rgba(202, 227, 244, .62); font-size: 8px; }
+.coverage-map-header > div:first-child { gap: 4px; }
+.coverage-map-header > div:first-child strong { color: #effaff; font-size: 15px; letter-spacing: -.025em; }
+.coverage-map-count { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.coverage-map-count strong { color: #c8f6ff; font-size: 18px; font-weight: 600; line-height: 1; }
+.coverage-map-count span { color: rgba(205, 226, 242, .58); font-size: 8px; white-space: nowrap; }
+.coverage-map-surfaces { display: flex; flex-direction: column; gap: 6px; }
+.coverage-map-surface { display: grid; grid-template-columns: 40px minmax(0, 1fr); align-items: center; gap: 6px; }
+.coverage-map-surface-label { color: rgba(203, 225, 240, .48); font-size: 8px; letter-spacing: .03em; }
+.coverage-map-grid { grid-template-columns: repeat(10, minmax(0, 1fr)); grid-auto-rows: 8px; gap: 3px; padding: 5px; border-color: rgba(205, 236, 255, .16); background: rgba(11, 27, 42, .78); }
+.coverage-map-cell { border-color: rgba(182, 210, 225, .3); background: rgba(150, 172, 187, .17); }
+.coverage-map-cell.coverage-low { border-color: rgba(137, 225, 246, .62); background: rgba(73, 191, 232, .48); }
+.coverage-map-cell.coverage-partial { border-color: rgba(163, 240, 255, .82); background: rgba(105, 218, 247, .77); box-shadow: 0 0 7px rgba(119, 215, 255, .3); }
+.coverage-map-cell.coverage-good,
+.coverage-map-cell.coverage-sufficient { border-color: #effdff; background: #c7f5ff; box-shadow: 0 0 9px rgba(141, 226, 255, .72); }
+.coverage-map-cell.is-current { outline: 2px solid #ffffff; outline-offset: 1px; }
+.coverage-map-hint { display: flex; align-items: center; gap: 7px; min-height: 26px; margin-top: 10px; padding: 7px 8px; border-radius: 9px; background: rgba(167, 230, 250, .1); color: rgba(237, 250, 255, .84); font-size: 9px; line-height: 1.2; }
+.coverage-map-hint-icon { display: inline-grid; width: 13px; height: 13px; flex: 0 0 auto; place-items: center; border: 1px solid rgba(202, 246, 255, .75); border-radius: 50%; color: #d9faff; font-size: 11px; line-height: 1; }
+.coverage-map-footer { margin-top: 10px; color: rgba(211, 232, 246, .72); font-size: 8px; }
+.coverage-legend-dot.is-filled { background: #bdf4ff; }
+
+.viewer-capture-image { position: absolute; inset: 0; z-index: 0; width: 100%; height: 100%; object-fit: cover; filter: saturate(.82) brightness(.75) contrast(.96); }
+.viewer-mode-hint { position: absolute; top: max(86px, calc(env(safe-area-inset-top) + 78px)); left: 16px; z-index: 3; display: flex; flex-direction: column; gap: 3px; max-width: 210px; padding: 9px 11px; border: 1px solid rgba(211, 242, 255, .14); border-radius: 11px; background: rgba(4, 12, 20, .46); color: rgba(237, 249, 255, .84); font-size: 10px; backdrop-filter: blur(14px); }
+.viewer-mode-hint strong { color: #f5fdff; font-size: 11px; font-weight: 650; }
+.viewer-mode-hint span { color: rgba(204, 226, 242, .66); line-height: 1.3; }
+.viewer-empty-note { position: absolute; right: 16px; bottom: 245px; z-index: 3; max-width: 230px; padding: 9px 11px; border: 1px solid rgba(255, 255, 255, .13); border-radius: 10px; background: rgba(4, 11, 19, .55); color: rgba(224, 239, 250, .68); font-size: 9px; line-height: 1.35; text-align: right; backdrop-filter: blur(12px); }
+.viewer-zoom-controls { position: absolute; bottom: 191px; left: 16px; z-index: 4; display: flex; overflow: hidden; border: 1px solid rgba(218, 243, 255, .2); border-radius: 999px; background: rgba(4, 11, 19, .62); backdrop-filter: blur(14px); }
+.viewer-zoom-controls button { display: grid; width: 32px; height: 31px; place-items: center; border: 0; border-right: 1px solid rgba(218, 243, 255, .12); background: transparent; color: rgba(242, 251, 255, .86); cursor: pointer; font-size: 15px; }
+.viewer-zoom-controls button:last-child { border-right: 0; }
+.viewer-zoom-controls button:nth-child(2) { width: 39px; color: rgba(194, 224, 242, .65); font-size: 9px; }
+.viewer-menu { position: absolute; top: max(67px, calc(env(safe-area-inset-top) + 60px)); right: 16px; z-index: 6; display: flex; flex-direction: column; gap: 5px; min-width: 164px; padding: 12px; border: 1px solid rgba(222, 245, 255, .2); border-radius: 14px; background: rgba(5, 12, 20, .9); box-shadow: 0 20px 44px rgba(0, 0, 0, .3); backdrop-filter: blur(18px); }
+.viewer-menu strong { margin-bottom: 4px; color: rgba(240, 251, 255, .88); font-size: 10px; }
+.viewer-menu button { padding: 8px 0; border: 0; border-top: 1px solid rgba(210, 239, 255, .1); background: transparent; color: rgba(219, 239, 251, .76); cursor: pointer; font-size: 10px; text-align: left; }
+.viewer-menu button:hover { color: #f5fdff; }
+
+@media (max-width: 700px) {
+  .coverage-map-card { top: max(116px, calc(env(safe-area-inset-top) + 103px)); left: 13px; width: min(206px, calc(100vw - 26px)); padding: 12px 10px 9px; }
+  .coverage-map-grid { gap: 2px; padding: 5px 4px; }
+  .coverage-map-surface { grid-template-columns: 38px minmax(0, 1fr); gap: 5px; }
+  .coverage-map-footer { font-size: 7px; }
+  .viewer-mode-hint { top: max(84px, calc(env(safe-area-inset-top) + 76px)); left: 13px; max-width: 185px; }
+  .viewer-zoom-controls { bottom: 181px; left: 13px; }
+  .viewer-empty-note { right: 13px; bottom: 231px; max-width: 180px; }
+}
+
 @media (max-width: 700px) {
   .coverage-map-card { top: max(122px, calc(env(safe-area-inset-top) + 108px)); left: 13px; width: 158px; padding: 10px 9px 8px; }
   .coverage-map-grid { gap: 2px; padding: 7px 5px; }
