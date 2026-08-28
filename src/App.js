@@ -3,7 +3,6 @@ import './App.css';
 import {
   DEFAULT_VIEWPOINT_THRESHOLDS,
   createDirectionalCoverage,
-  coverageOpacity,
   getVisibleCellIds,
   isReconstructionViable,
   selectBestKeyframes,
@@ -11,7 +10,6 @@ import {
 } from './scanner/coverageModel';
 import {
   buildFrameEvidence,
-  buildScreenMesh,
   extractFrameFeatures,
   updateFeatureTracks,
 } from './scanner/featureTracking';
@@ -25,6 +23,17 @@ import {
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
+
+function getReconstructionViewerUrl(result) {
+  const value = result?.viewerUrl || result?.viewer?.url;
+  if (!value) return null;
+  try {
+    const url = new URL(value, window.location.href);
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
 
 function isMobileScanDevice() {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -41,8 +50,6 @@ const createEmptyScanState = () => ({
   featureTracks: [],
   distinctViewpoints: 0,
   meaningfulCameraMotion: false,
-  sparsePoints: [],
-  surfacePatches: [],
   stableFeatures: [],
   lastFrame: null,
   lastViewpoint: null,
@@ -112,574 +119,34 @@ function Icon({ name, size = 18 }) {
   return <svg {...common}>{paths[name] || paths.more}</svg>;
 }
 
-function CoverageCanvas({
-  cells,
-  mappingReady,
-  view,
-  stableFeatures,
-  sparsePoints,
-  surfacePatches,
-  parallax,
-}) {
-  const canvasRef = useRef(null);
-  const coverageTargetsRef = useRef(new Map());
-  const displayedRef = useRef(new Map());
-
-  useEffect(() => {
-    coverageTargetsRef.current = new Map(cells.map((cell) => [cell.id, cell.coverage]));
-  }, [cells]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-
-    let frameId;
-    let active = true;
-    let lastDrawAt = 0;
-    const coverageLookup = new Map(cells.map((cell) => [`${cell.pitchBand}-${cell.yawIndex}`, cell]));
-
-    const resizeCanvas = () => {
-      const rect = canvas.getBoundingClientRect();
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.max(1, Math.round(rect.width * pixelRatio));
-      canvas.height = Math.max(1, Math.round(rect.height * pixelRatio));
-      canvas.style.width = `${rect.width}px`;
-      canvas.style.height = `${rect.height}px`;
-    };
-
-    const drawTrackedFeatures = (context, width, height) => {
-      const visible = stableFeatures.filter((feature) => feature.confidence >= 0.42);
-      context.save();
-      context.lineWidth = 1;
-      for (let index = 0; index < visible.length; index += 1) {
-        for (let nextIndex = index + 1; nextIndex < visible.length; nextIndex += 1) {
-          const first = visible[index];
-          const second = visible[nextIndex];
-          const distance = Math.hypot(first.x - second.x, first.y - second.y);
-          if (distance < 0.18) {
-            const confidence = Math.min(first.confidence, second.confidence);
-            const firstPoint = { x: first.x * width, y: first.y * height };
-            const secondPoint = { x: second.x * width, y: second.y * height };
-            const depth = Math.max(3, Math.min(18, parallax * width * 0.42));
-            const firstDepth = {
-              x: firstPoint.x + (first.x - 0.5) * depth,
-              y: firstPoint.y + (first.y - 0.5) * depth * 0.5,
-            };
-            const secondDepth = {
-              x: secondPoint.x + (second.x - 0.5) * depth,
-              y: secondPoint.y + (second.y - 0.5) * depth * 0.5,
-            };
-            context.strokeStyle = `rgba(213, 248, 255, ${0.18 + confidence * 0.32})`;
-            context.beginPath();
-            context.moveTo(firstPoint.x, firstPoint.y);
-            context.lineTo(secondPoint.x, secondPoint.y);
-            context.stroke();
-            // A short offset edge gives tracked correspondences a spatial cue
-            // without drawing artificial wall-sized rectangles.
-            context.strokeStyle = `rgba(137, 225, 255, ${0.12 + confidence * 0.2})`;
-            context.beginPath();
-            context.moveTo(firstDepth.x, firstDepth.y);
-            context.lineTo(secondDepth.x, secondDepth.y);
-            context.moveTo(firstPoint.x, firstPoint.y);
-            context.lineTo(firstDepth.x, firstDepth.y);
-            context.moveTo(secondPoint.x, secondPoint.y);
-            context.lineTo(secondDepth.x, secondDepth.y);
-            context.stroke();
-          }
-        }
-      }
-
-      visible.forEach((feature) => {
-        const x = feature.x * width;
-        const y = feature.y * height;
-        const radius = 2.5 + Math.min(feature.confidence, 1) * 2;
-        context.beginPath();
-        context.arc(x, y, radius + 4, 0, Math.PI * 2);
-        context.strokeStyle = 'rgba(193, 242, 255, 0.18)';
-        context.stroke();
-        context.beginPath();
-        context.arc(x, y, radius, 0, Math.PI * 2);
-        context.fillStyle = 'rgba(230, 250, 255, 0.86)';
-        context.fill();
-      });
-      context.restore();
-    };
-
-    const drawGeometry = (context, width, height) => {
-      context.save();
-      surfacePatches
-        .filter((patch) => patch.confidence >= 0.64 && patch.screenVertices)
-        .forEach((patch) => {
-          context.beginPath();
-          patch.screenVertices.forEach((vertex, index) => {
-            const x = vertex.x * width;
-            const y = vertex.y * height;
-            if (index === 0) context.moveTo(x, y);
-            else context.lineTo(x, y);
-          });
-          context.closePath();
-          context.strokeStyle = `rgba(230, 250, 255, ${0.2 + patch.confidence * 0.5})`;
-          context.lineWidth = 0.75;
-          context.stroke();
-          const center = patch.centroid || {
-            x: patch.screenVertices.reduce((sum, vertex) => sum + vertex.x, 0) / patch.screenVertices.length,
-            y: patch.screenVertices.reduce((sum, vertex) => sum + vertex.y, 0) / patch.screenVertices.length,
-          };
-          context.beginPath();
-          context.arc(center.x * width, center.y * height, 1.15, 0, Math.PI * 2);
-          context.fillStyle = 'rgba(241, 253, 255, 0.74)';
-          context.fill();
-        });
-
-      sparsePoints
-        .filter((point) => point.confidence >= 0.62 && point.screen)
-        .forEach((point) => {
-          const x = point.screen.x * width;
-          const y = point.screen.y * height;
-          context.beginPath();
-          context.arc(x, y, 7, 0, Math.PI * 2);
-          context.strokeStyle = 'rgba(218, 249, 255, 0.28)';
-          context.stroke();
-          context.beginPath();
-          context.arc(x, y, 2.4, 0, Math.PI * 2);
-          context.fillStyle = 'rgba(233, 252, 255, 0.95)';
-          context.fill();
-        });
-      context.restore();
-    };
-
-    const sampleCoverage = (screenX, screenY) => {
-      const yawBins = cells[0]?.yawBins || 20;
-      const yawSize = 360 / yawBins;
-      const roomYaw = ((view.yaw + (screenX - 0.5) * 78) % 360 + 360) % 360;
-      const yawPosition = roomYaw / yawSize - 0.5;
-      const yawBase = Math.floor(yawPosition);
-      const yawFraction = yawPosition - yawBase;
-      const pitch = Math.max(-24, Math.min(24, view.pitch + (0.5 - screenY) * 58));
-      const pitchPosition = (24 - pitch) / 24;
-      const pitchBase = Math.max(0, Math.min(1, Math.floor(pitchPosition)));
-      const pitchFraction = Math.max(0, Math.min(1, pitchPosition - pitchBase));
-      const getCoverage = (pitchBand, yawIndex) => {
-        const wrappedYaw = ((yawIndex % yawBins) + yawBins) % yawBins;
-        const cell = coverageLookup.get(`${pitchBand}-${wrappedYaw}`);
-        return displayedRef.current.get(cell?.id) ?? cell?.coverage ?? 0;
-      };
-      const topLeft = getCoverage(pitchBase, yawBase);
-      const topRight = getCoverage(pitchBase, yawBase + 1);
-      const bottomLeft = getCoverage(Math.min(2, pitchBase + 1), yawBase);
-      const bottomRight = getCoverage(Math.min(2, pitchBase + 1), yawBase + 1);
-      const top = topLeft + (topRight - topLeft) * yawFraction;
-      const bottom = bottomLeft + (bottomRight - bottomLeft) * yawFraction;
-      return top + (bottom - top) * pitchFraction;
-    };
-
-    const maskCanvas = document.createElement('canvas');
-    const drawCoverageMask = (context, width, height) => {
-      context.save();
-      if (!mappingReady) {
-        context.fillStyle = 'rgba(31, 83, 225, .58)';
-        context.fillRect(0, 0, width, height);
-        context.restore();
-        return;
-      }
-
-      const maskWidth = Math.min(128, Math.max(72, Math.round(width / 4)));
-      const maskHeight = Math.max(64, Math.round(maskWidth * height / Math.max(width, 1)));
-      if (maskCanvas.width !== maskWidth || maskCanvas.height !== maskHeight) {
-        maskCanvas.width = maskWidth;
-        maskCanvas.height = maskHeight;
-      }
-      const maskContext = maskCanvas.getContext('2d');
-      if (!maskContext) {
-        context.restore();
-        return;
-      }
-      const image = maskContext.createImageData(maskWidth, maskHeight);
-      for (let y = 0; y < maskHeight; y += 1) {
-        for (let x = 0; x < maskWidth; x += 1) {
-          const coverage = sampleCoverage(x / Math.max(maskWidth - 1, 1), y / Math.max(maskHeight - 1, 1));
-          const alpha = Math.round(coverageOpacity(coverage) * 255);
-          const index = (y * maskWidth + x) * 4;
-          image.data[index] = 31;
-          image.data[index + 1] = 83;
-          image.data[index + 2] = 225;
-          image.data[index + 3] = alpha;
-        }
-      }
-      maskContext.putImageData(image, 0, 0);
-      context.imageSmoothingEnabled = true;
-      context.filter = 'blur(8px)';
-      context.drawImage(maskCanvas, 0, 0, width, height);
-      context.restore();
-    };
-
-    const revealScannedMesh = (context, width, height) => {
-      const patches = surfacePatches.filter((patch) => patch.confidence >= 0.18 && patch.screenVertices?.length >= 3);
-      if (!patches.length) return;
-      context.save();
-      context.globalCompositeOperation = 'destination-out';
-      patches.forEach((patch) => {
-        context.beginPath();
-        patch.screenVertices.forEach((vertex, index) => {
-          const x = vertex.x * width;
-          const y = vertex.y * height;
-          if (index === 0) context.moveTo(x, y);
-          else context.lineTo(x, y);
-        });
-        context.closePath();
-        context.fillStyle = `rgba(0, 0, 0, ${Math.min(0.96, 0.58 + patch.confidence * 0.4)})`;
-        context.shadowColor = 'rgba(0, 0, 0, 0.68)';
-        context.shadowBlur = 9;
-        context.fill();
-      });
-      context.restore();
-    };
-
-    const draw = (timestamp = 0) => {
-      if (!active) return;
-      if (timestamp - lastDrawAt < 1000 / 30) {
-        frameId = window.requestAnimationFrame(draw);
-        return;
-      }
-      lastDrawAt = timestamp;
-      const rect = canvas.getBoundingClientRect();
-      const width = rect.width;
-      const height = rect.height;
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const context = canvas.getContext('2d');
-      if (!context || !width || !height) {
-        frameId = window.requestAnimationFrame(draw);
-        return;
-      }
-
-      if (canvas.width !== Math.round(width * pixelRatio) || canvas.height !== Math.round(height * pixelRatio)) {
-        resizeCanvas();
-      }
-
-      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      context.clearRect(0, 0, width, height);
-
-      cells.forEach((cell) => {
-        const coverageTarget = coverageTargetsRef.current.get(cell.id) ?? cell.coverage;
-        const current = displayedRef.current.get(cell.id) ?? 0;
-        const next = current + (coverageTarget - current) * 0.14;
-        displayedRef.current.set(cell.id, Math.abs(coverageTarget - next) < 0.002 ? coverageTarget : next);
-      });
-
-      drawCoverageMask(context, width, height);
-      revealScannedMesh(context, width, height);
-      drawTrackedFeatures(context, width, height);
-      drawGeometry(context, width, height);
-      frameId = window.requestAnimationFrame(draw);
-    };
-
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
-    draw();
-    return () => {
-      active = false;
-      window.cancelAnimationFrame(frameId);
-      window.removeEventListener('resize', resizeCanvas);
-    };
-  }, [cells, mappingReady, parallax, sparsePoints, stableFeatures, surfacePatches, view]);
-
-  return <canvas ref={canvasRef} className="coverage-canvas" data-coverage-state={mappingReady ? 'directional' : 'initial-blue'} aria-hidden="true" />;
-}
-
-function RoomModelCanvas({ rotation, zoom, frameIndex, hasCapture, firstPerson = false }) {
-  const canvasRef = useRef(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-    const draw = () => {
-      const rect = canvas.getBoundingClientRect();
-      const width = rect.width;
-      const height = rect.height;
-      const ratio = Math.min(window.devicePixelRatio || 1, 2);
-      if (!width || !height) return;
-      canvas.width = Math.round(width * ratio);
-      canvas.height = Math.round(height * ratio);
-      const context = canvas.getContext('2d');
-      if (!context) return;
-      context.setTransform(ratio, 0, 0, ratio, 0, 0);
-
-      context.clearRect(0, 0, width, height);
-      if (!hasCapture) {
-        const background = context.createLinearGradient(0, 0, 0, height);
-        background.addColorStop(0, '#111b2a');
-        background.addColorStop(0.54, '#172a43');
-        background.addColorStop(1, '#07111f');
-        context.fillStyle = background;
-        context.fillRect(0, 0, width, height);
-        const glow = context.createRadialGradient(width * 0.52, height * 0.36, 4, width * 0.52, height * 0.36, width * 0.66);
-        glow.addColorStop(0, 'rgba(79, 174, 255, .22)');
-        glow.addColorStop(1, 'rgba(79, 174, 255, 0)');
-        context.fillStyle = glow;
-        context.fillRect(0, 0, width, height);
-      } else {
-        context.fillStyle = 'rgba(3, 12, 21, .2)';
-        context.fillRect(0, 0, width, height);
-      }
-
-      const angle = (rotation * Math.PI) / 180;
-      const focal = Math.min(width, height) * 0.82 * zoom;
-      const cameraDepth = firstPerson ? 3.15 : 5.8;
-      const cameraHeight = firstPerson ? 1.42 : 0;
-      const project = ({ x, y, z }) => {
-        const rotatedX = x * Math.cos(angle) - z * Math.sin(angle);
-        const rotatedZ = x * Math.sin(angle) + z * Math.cos(angle);
-        const depth = Math.max(0.72, cameraDepth + rotatedZ);
-        const scale = focal / depth;
-        return { x: width / 2 + rotatedX * scale, y: height * 0.53 - (y - cameraHeight) * scale };
-      };
-      const line = (points, color, lineWidth = 1) => {
-        context.beginPath();
-        points.forEach((point, index) => {
-          const projected = project(point);
-          if (index === 0) context.moveTo(projected.x, projected.y);
-          else context.lineTo(projected.x, projected.y);
-        });
-        context.strokeStyle = color;
-        context.lineWidth = lineWidth;
-        context.stroke();
-      };
-      const fill = (points, color, stroke = 'rgba(184, 235, 255, .35)') => {
-        context.beginPath();
-        points.forEach((point, index) => {
-          const projected = project(point);
-          if (index === 0) context.moveTo(projected.x, projected.y);
-          else context.lineTo(projected.x, projected.y);
-        });
-        context.closePath();
-        context.fillStyle = color;
-        context.fill();
-        context.strokeStyle = stroke;
-        context.lineWidth = 1;
-        context.stroke();
-      };
-
-      const floor = [{ x: -2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: 2.1 }, { x: -2.6, y: 0, z: 2.1 }];
-      const backWall = [{ x: -2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: -1.9 }, { x: 2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 2.65, z: -1.9 }];
-      const leftWall = [{ x: -2.6, y: 0, z: 2.1 }, { x: -2.6, y: 0, z: -1.9 }, { x: -2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 2.65, z: 2.1 }];
-      fill(floor, 'rgba(21, 95, 153, .18)', 'rgba(157, 224, 255, .32)');
-      fill(backWall, 'rgba(40, 120, 173, .13)', 'rgba(178, 233, 255, .42)');
-      fill(leftWall, 'rgba(13, 77, 129, .14)', 'rgba(151, 220, 255, .28)');
-
-      for (let x = -2.5; x <= 2.5; x += 0.5) line([{ x, y: 0, z: -1.9 }, { x, y: 0, z: 2.1 }], 'rgba(165, 224, 255, .18)');
-      for (let z = -1.7; z <= 2; z += 0.45) line([{ x: -2.6, y: 0, z }, { x: 2.6, y: 0, z }], 'rgba(165, 224, 255, .16)');
-      for (let y = 0.45; y < 2.65; y += 0.45) line([{ x: -2.6, y, z: -1.9 }, { x: 2.6, y, z: -1.9 }], 'rgba(165, 224, 255, .13)');
-      line([{ x: -2.6, y: 0, z: -1.9 }, { x: 2.6, y: 0, z: -1.9 }, { x: 2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 2.65, z: -1.9 }, { x: -2.6, y: 0, z: -1.9 }], 'rgba(220, 249, 255, .62)', 1.4);
-
-      fill([{ x: -1.35, y: 0.38, z: -1.87 }, { x: 0.9, y: 0.38, z: -1.87 }, { x: 0.9, y: 1.55, z: -1.87 }, { x: -1.35, y: 1.55, z: -1.87 }], 'rgba(80, 180, 234, .13)', 'rgba(189, 241, 255, .6)');
-      fill([{ x: 1.42, y: 0.2, z: 0.2 }, { x: 2.15, y: 0.2, z: 0.2 }, { x: 2.15, y: 0.82, z: 0.2 }, { x: 1.42, y: 0.82, z: 0.2 }], 'rgba(62, 161, 224, .2)', 'rgba(178, 231, 255, .5)');
-
-      for (let index = 0; index < 82; index += 1) {
-        const wave = index * 1.731;
-        const point = {
-          x: -2.45 + ((index * 37) % 100) / 100 * 4.9 + Math.sin(wave) * 0.035,
-          y: 0.12 + ((index * 19) % 92) / 100 * 2.35 + Math.cos(wave) * 0.035,
-          z: -1.82 + ((index * 53) % 100) / 100 * 3.75,
-        };
-        const projected = project(point);
-        if (projected.x < -10 || projected.x > width + 10 || projected.y < -10 || projected.y > height + 10) continue;
-        context.beginPath();
-        context.arc(projected.x, projected.y, index % 5 === frameIndex % 5 ? 2.2 : 1.2, 0, Math.PI * 2);
-        context.fillStyle = index % 5 === frameIndex % 5 ? 'rgba(236, 253, 255, .95)' : 'rgba(113, 207, 255, .7)';
-        context.fill();
-      }
-
-      const scanY = 0.35 + ((frameIndex % 52) / 52) * 2.1;
-      line([{ x: -2.55, y: scanY, z: -1.94 }, { x: 2.55, y: scanY, z: -1.94 }], 'rgba(222, 251, 255, .48)', 1.3);
-    };
-    draw();
-    const onResize = () => draw();
-    const resizeObserver = window.ResizeObserver ? new ResizeObserver(onResize) : null;
-    resizeObserver?.observe(canvas);
-    window.addEventListener('resize', onResize);
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', onResize);
-    };
-  }, [firstPerson, frameIndex, hasCapture, rotation, zoom]);
-
-  return <canvas ref={canvasRef} className="room-model-canvas" aria-label="Interactive room scan model" />;
-}
 
 function RoomViewerScreen({ selectedKeyframes, reconstruction, onBack }) {
-  const [frameIndex, setFrameIndex] = useState(1);
-  const [rotation, setRotation] = useState(-13);
-  const [zoom, setZoom] = useState(1);
-  const [activeTool, setActiveTool] = useState('mesh');
-  const [menuOpen, setMenuOpen] = useState(false);
-  const dragRef = useRef(null);
-  const totalFrames = 172;
-  const activeFrameIndex = selectedKeyframes.length
-    ? Math.min(selectedKeyframes.length - 1, Math.round(((frameIndex - 1) / (totalFrames - 1)) * (selectedKeyframes.length - 1)))
-    : -1;
-  const activeFrame = activeFrameIndex >= 0 ? selectedKeyframes[activeFrameIndex] : null;
-  const captureImage = activeFrame?.thumbnail || null;
-  const remoteViewerUrl = reconstruction?.viewerUrl || reconstruction?.viewer?.url || null;
-  const showModel = !remoteViewerUrl && activeTool !== 'camera' && activeTool !== 'video';
-  const modeCopy = {
-    mesh: ['Mesh view', 'Drag to rotate the room model'],
-    walk: ['Walk view', 'Drag across the room to look around'],
-    camera: ['Captured view', captureImage ? `Viewpoint ${activeFrameIndex + 1} of ${selectedKeyframes.length}` : 'No captured image is available'],
-    layers: ['Scan layers', 'Captured views and the room model are visible'],
-    measure: ['Measure', 'Tap two points, then confirm the real distance'],
-    views: ['Saved views', 'Use the timeline to move between viewpoints'],
-    comment: ['Comment', 'Choose a saved viewpoint to discuss'],
-    video: ['Capture video', captureImage ? 'Showing the selected camera frame' : 'No captured image is available'],
-  }[activeTool] || ['Room model', 'Drag to rotate the room model'];
-  const [measurement, setMeasurement] = useState({ start: null, end: null });
-  const [measurementInput, setMeasurementInput] = useState('');
-  const [confirmedMeasurement, setConfirmedMeasurement] = useState(null);
-
-  const handlePointerDown = (event) => {
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    dragRef.current = { x: event.clientX, y: event.clientY, rotation };
-  };
-  const handlePointerMove = (event) => {
-    if (!dragRef.current || activeTool === 'measure') return;
-    const delta = event.clientX - dragRef.current.x;
-    setRotation(Math.max(-58, Math.min(58, dragRef.current.rotation + delta * 0.18)));
-  };
-  const handlePointerUp = () => { dragRef.current = null; };
-  const handleStageClick = (event) => {
-    if (activeTool !== 'measure') return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    if (!rect.width || !rect.height) return;
-    const point = {
-      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
-      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
-    };
-    setMeasurement((current) => current.start && current.end ? { start: point, end: null } : current.start ? { ...current, end: point } : { start: point, end: null });
-    setMeasurementInput('');
-    setConfirmedMeasurement(null);
-  };
-  const handleWheel = (event) => {
-    event.preventDefault();
-    setZoom((value) => Math.max(0.78, Math.min(1.35, value - event.deltaY * 0.0008)));
-  };
-  const resetViewer = () => {
-    setFrameIndex(1);
-    setRotation(-13);
-    setZoom(1);
-    setMeasurement({ start: null, end: null });
-    setMeasurementInput('');
-    setConfirmedMeasurement(null);
-    setMenuOpen(false);
-  };
-  const handleToolChange = (tool) => {
-    setActiveTool(tool);
-    if (tool !== 'measure') {
-      setMeasurement({ start: null, end: null });
-      setMeasurementInput('');
-      setConfirmedMeasurement(null);
-    }
-  };
-  const confirmMeasurement = (event) => {
-    event.preventDefault();
-    const distance = Number(measurementInput);
-    if (measurement.start && measurement.end && Number.isFinite(distance) && distance > 0) setConfirmedMeasurement(distance);
-  };
-  const exportScan = () => {
-    const payload = JSON.stringify({ format: 'polyscan-room-viewer', frames: totalFrames, viewpoints: selectedKeyframes.length, createdAt: new Date().toISOString() }, null, 2);
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
-    link.download = 'polyscan-room-scan.json';
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(link.href), 0);
-  };
+  const viewerUrl = getReconstructionViewerUrl(reconstruction);
 
   return (
     <main className="room-viewer-screen">
-      <section className="viewer-stage" aria-label={activeTool === 'measure' ? 'Room measurement tool' : 'Room viewer'} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { dragRef.current = null; }} onClick={handleStageClick} onWheel={handleWheel}>
-        {remoteViewerUrl && <iframe className="viewer-remote-frame" src={remoteViewerUrl} title="First-person reconstructed room viewer" allow="fullscreen; xr-spatial-tracking" style={{ pointerEvents: activeTool === 'measure' ? 'none' : 'auto' }} />}
-        {!remoteViewerUrl && captureImage && <img className="viewer-capture-image" src={captureImage} alt={`Captured room viewpoint ${activeFrameIndex + 1}`} />}
-        {showModel && <RoomModelCanvas rotation={rotation} zoom={zoom} frameIndex={frameIndex} hasCapture={Boolean(captureImage)} firstPerson={activeTool === 'walk'} />}
-        <div className="viewer-vignette" aria-hidden="true" />
-        <div className="viewer-crosshair" aria-hidden="true"><span /></div>
-        <div className="viewer-stage-caption"><span className="scan-live-dot" /> {modeCopy[0]}</div>
-        <div className="viewer-mode-hint"><strong>{modeCopy[0]}</strong><span>{modeCopy[1]}</span></div>
-        {!captureImage && !remoteViewerUrl && <div className="viewer-empty-note">This scan has no saved camera image. The model preview is still interactive.</div>}
-        {activeTool === 'measure' && (
-          <>
-            <svg className="viewer-measure-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-              {measurement.start && measurement.end && <line x1={measurement.start.x * 100} y1={measurement.start.y * 100} x2={measurement.end.x * 100} y2={measurement.end.y * 100} />}
-              {measurement.start && <circle cx={measurement.start.x * 100} cy={measurement.start.y * 100} r="1.7" />}
-              {measurement.end && <circle cx={measurement.end.x * 100} cy={measurement.end.y * 100} r="1.7" />}
-            </svg>
-            <div className="viewer-measure-panel" role="status" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-              <strong>Confirm a measurement</strong>
-              {!measurement.start && <span>Tap the first point on the room.</span>}
-              {measurement.start && !measurement.end && <span>Tap the second point.</span>}
-              {measurement.start && measurement.end && !confirmedMeasurement && (
-                <form onSubmit={confirmMeasurement}>
-                  <label htmlFor="measurement-distance">Real distance</label>
-                  <div className="measurement-input-row"><input id="measurement-distance" type="number" min="0.01" step="0.01" inputMode="decimal" value={measurementInput} onChange={(event) => setMeasurementInput(event.target.value)} placeholder="e.g. 3.20" /><span>m</span></div>
-                  <button type="submit" disabled={!measurementInput}>Confirm measurement</button>
-                </form>
-              )}
-              {confirmedMeasurement && <span className="measurement-confirmed">{confirmedMeasurement} m confirmed</span>}
-              {(measurement.start || measurement.end) && <button type="button" className="measurement-clear" onClick={() => { setMeasurement({ start: null, end: null }); setMeasurementInput(''); setConfirmedMeasurement(null); }}>Clear points</button>}
-            </div>
-          </>
-        )}
-        <div className="viewer-zoom-controls" aria-label="Room viewer zoom" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
-          <button type="button" onClick={() => setZoom((value) => Math.max(0.78, value - 0.08))} aria-label="Zoom out">-</button>
-          <button type="button" onClick={resetViewer} aria-label="Reset room viewer">1:1</button>
-          <button type="button" onClick={() => setZoom((value) => Math.min(1.35, value + 0.08))} aria-label="Zoom in">+</button>
-        </div>
-      </section>
-
       <header className="viewer-header">
-        <button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to scan review"><Icon name="back" size={19} /></button>
-        <div className="viewer-title"><strong>Room scan</strong><span>{selectedKeyframes.length || 0} viewpoints held</span></div>
-        <div className="viewer-header-actions">
-          <button type="button" className="viewer-header-button" onClick={() => setMenuOpen((value) => !value)} aria-label="More room scan options" aria-expanded={menuOpen}><Icon name="more" size={19} /></button>
-          <button type="button" className="viewer-header-button" onClick={() => { if (navigator.share) navigator.share({ title: 'PolyScan room scan' }).catch(() => {}); }} aria-label="Share room scan"><Icon name="share" size={18} /></button>
-          <button type="button" className="viewer-header-button" onClick={exportScan} aria-label="Export room scan"><Icon name="download" size={18} /></button>
+        <button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to capture review"><Icon name="back" size={19} /></button>
+        <div className="viewer-title">
+          <strong>{viewerUrl ? 'Reconstructed room' : 'Room unavailable'}</strong>
+          <span>{viewerUrl ? `${selectedKeyframes.length || 0} source viewpoints` : 'No reconstructed geometry'}</span>
         </div>
       </header>
-
-      {menuOpen && (
-        <div className="viewer-menu" role="dialog" aria-label="Room viewer options">
-          <strong>Viewer options</strong>
-          <button type="button" onClick={resetViewer}>Reset view</button>
-          <button type="button" onClick={exportScan}>Export scan data</button>
-        </div>
-      )}
-
-      <div className="viewer-tool-rail" aria-label="Room viewer tools">
-        {[['walk', 'walk', 'Walk'], ['mesh', 'mesh', 'Mesh'], ['camera', 'camera', 'Camera'], ['layers', 'layers', 'Layers']].map(([tool, icon, label]) => (
-          <button key={tool} type="button" className={`viewer-tool-button${activeTool === tool ? ' is-active' : ''}`} onClick={() => handleToolChange(tool)} aria-label={label} aria-pressed={activeTool === tool}>
-            <Icon name={icon} size={19} />
-            {tool === 'layers' && <span className="tool-alert" aria-hidden="true" />}
-          </button>
-        ))}
-      </div>
-
-      <div className="viewer-frame-pill"><span>Frame</span><strong>{frameIndex}</strong><span>of {totalFrames}</span></div>
-
-      <div className="viewer-timeline-wrap">
-        <button type="button" className="viewer-back-button" onClick={onBack}><Icon name="back" size={16} /><span>Back</span></button>
-        <input type="range" min="1" max={totalFrames} value={frameIndex} onChange={(event) => setFrameIndex(Number(event.target.value))} aria-label="Captured frame" />
-        <div className="timeline-arrows">
-          <button type="button" onClick={() => setFrameIndex((value) => Math.max(1, value - 1))} aria-label="Previous frame">‹</button>
-          <button type="button" onClick={() => setFrameIndex((value) => Math.min(totalFrames, value + 1))} aria-label="Next frame">›</button>
-        </div>
-      </div>
-
-      <nav className="viewer-bottom-nav" aria-label="Room viewer navigation">
-        <button type="button" onClick={() => handleToolChange('measure')} className={activeTool === 'measure' ? 'is-active' : ''}><Icon name="measure" size={18} /><span>Measure</span></button>
-        <button type="button" onClick={() => handleToolChange('views')} className={activeTool === 'views' ? 'is-active' : ''}><Icon name="eye" size={18} /><span>Views</span></button>
-        <button type="button" onClick={() => handleToolChange('comment')} className={activeTool === 'comment' ? 'is-active' : ''}><Icon name="comment" size={18} /><span>Comment</span></button>
-        <button type="button" onClick={() => handleToolChange('video')} className={activeTool === 'video' ? 'is-active' : ''}><Icon name="video" size={18} /><span>Video</span></button>
-      </nav>
+      <section className="viewer-stage" aria-label={viewerUrl ? 'Reconstructed room viewer' : 'Reconstructed room unavailable'}>
+        {viewerUrl
+          ? <iframe className="viewer-remote-frame" src={viewerUrl} title="Reconstructed 3D room viewer" allow="fullscreen; xr-spatial-tracking" />
+          : (
+            <div className="viewer-missing-model" role="alert">
+              <strong>No 3D model was produced.</strong>
+              <span>PolyScan only opens this viewer after the reconstruction service returns real room geometry.</span>
+              <button type="button" onClick={onBack}>Back to capture</button>
+            </div>
+          )}
+      </section>
     </main>
   );
 }
+
 
 function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
   return (
@@ -692,9 +159,9 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
       <section className="launch-content">
         <div className="launch-copy">
           <p className="eyebrow">Spatial camera</p>
-          <h1>See the room<br /><span>take shape.</span></h1>
+          <h1>Capture the room.<br /><span>Reconstruct it for real.</span></h1>
           <p className="launch-description">
-            Move through the space and watch the blue field clear as useful viewpoints accumulate.
+            Record overlapping views on your phone, then send the video to the connected 3D reconstruction service.
           </p>
           {scanAvailable ? (
             <div className="launch-actions">
@@ -735,7 +202,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
           <div className="visual-room-edge visual-room-edge-left" />
           <div className="visual-room-edge visual-room-edge-right" />
           <div className="visual-crosshair" />
-          <div className="visual-caption">Coverage follows the room, not a checklist.</div>
+          <div className="visual-caption">Live guidance records viewpoints. Geometry is built after upload.</div>
         </div>
       </section>
 
@@ -752,7 +219,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const analysisCanvasRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
   const orientationRef = useRef({ yaw: 0, pitch: 0 });
-  const [view, setView] = useState({ yaw: 0, pitch: 0 });
   const [trackingState, setTrackingState] = useState('searching');
   const [captureState, setCaptureState] = useState('waiting');
   // Capture starts with the scan surface. Pause is the only capture toggle;
@@ -940,11 +406,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         featureConfidence: evidence.featureConfidence,
         parallax: evidence.parallax,
       });
-      const meshActive = current.meaningfulCameraMotion || evidence.usefulViewpoint;
-      const surfacePatches = meshActive && evidence.tracking
-        ? buildScreenMesh(evidence.stableFeatures)
-        : [];
-
       const isFirstKeyframe = current.cameraKeyframes.length === 0;
       let thumbnail = null;
       try {
@@ -974,7 +435,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         distinctViewpoints: current.distinctViewpoints + (evidence.usefulViewpoint ? 1 : 0),
         meaningfulCameraMotion: current.meaningfulCameraMotion || evidence.usefulViewpoint,
         stableFeatures: evidence.stableFeatures,
-        surfacePatches,
         lastFrame: { ...currentFrame, viewpoint: evidence.viewpoint },
         lastViewpoint: evidence.viewpoint,
         lastEvidence: evidence,
@@ -982,7 +442,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       scanRef.current = nextState;
       onScanStateChange(nextState);
       setTrackingState(evidence.tracking ? 'tracking' : current.lastFrame ? 'lost' : 'searching');
-      setView({ yaw: orientation.yaw, pitch: orientation.pitch });
     };
 
     const timer = window.setInterval(captureFrame, CAPTURE_INTERVAL_MS);
@@ -998,14 +457,13 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     meaningfulCameraMotion: scanState.meaningfulCameraMotion,
   });
   const mappingReady = keyframeCount > 0;
-  const meshPatchCount = scanState.surfacePatches.length;
   const instruction = paused
     ? 'Paused'
     : trackingState === 'lost'
-      ? 'Look at a scanned area'
+      ? 'Return to a detailed area'
       : mappingReady
-        ? 'Move slowly around the room'
-        : 'Move around the room';
+        ? 'Keep moving sideways for depth'
+        : 'Move slowly around the room';
   const cameraMessage = cameraState === 'unavailable'
     ? 'Camera preview unavailable'
     : cameraState === 'blocked'
@@ -1022,7 +480,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       : cameraState === 'requesting'
         ? 'Allow camera'
         : recording
-          ? 'Scanning'
+          ? 'Recording'
           : 'Ready';
   const handleDone = async () => {
     const capture = await stopCaptureRecording();
@@ -1035,15 +493,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <section className="scan-preview-frame" aria-label="Room camera preview">
         <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
         <CameraPlaceholder />
-        <CoverageCanvas
-          cells={scanState.directionalCoverage}
-          mappingReady={mappingReady}
-          view={view}
-          stableFeatures={scanState.stableFeatures}
-          sparsePoints={scanState.sparsePoints}
-          surfacePatches={scanState.surfacePatches}
-          parallax={scanState.lastEvidence?.parallax || 0}
-        />
+        <div className={`capture-guidance-layer${mappingReady ? ' is-ready' : ''}`} aria-hidden="true" />
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
         <div className="camera-corners" aria-hidden="true">
           <span className="corner corner-top-left" />
@@ -1079,7 +529,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{mappingReady ? (meshPatchCount ? 'Mesh active' : 'Finding surfaces') : 'Blue = unscanned'}</span>
+        <span className="scan-frame-count">{mappingReady ? `${scanState.distinctViewpoints} useful viewpoints` : 'Collecting camera motion'}</span>
       </div>
 
       <div className="scan-bottom-ui scan-reference-bottom">
@@ -1093,7 +543,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
             <span>Auto</span>
             <span className="mode-chevron">⌃</span>
           </button>
-          <div className={`scan-map-control${recording ? ' is-active' : ''}`} aria-label="Live spatial mapping active">
+          <div className={`scan-map-control${recording ? ' is-active' : ''}`} aria-label="Capture recording active">
             <span className="scan-map-control-core" aria-hidden="true"><Icon name="layers" size={21} /></span>
           </div>
           <button
@@ -1122,7 +572,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   );
 }
 
-function ReviewScreen({ selectedKeyframes, capture, onProcess, onScanAgain }) {
+function ReviewScreen({ selectedKeyframes, capture, processingAvailable, onProcess, onScanAgain }) {
   const preview = selectedKeyframes.find((frame) => frame.thumbnail)?.thumbnail;
   const hasCapture = Boolean(capture?.blob);
   const duration = capture?.durationMs ? `${Math.max(1, Math.round(capture.durationMs / 1000))}s` : hasCapture ? 'Video' : selectedKeyframes.length ? 'Local' : 'None';
@@ -1137,16 +587,17 @@ function ReviewScreen({ selectedKeyframes, capture, onProcess, onScanAgain }) {
         <div className="review-copy-block">
           <p className="eyebrow">Scan complete</p>
           <h1>Review your<br /><span>room capture.</span></h1>
-          <p>{hasCapture ? 'Your video is ready to upload for reconstruction. You can preview it before building the room.' : 'We held the strongest viewpoints locally. Open the preview now or add a recorded video for reconstruction.'}</p>
+          <p>{hasCapture ? 'Your video is ready for server-side 3D reconstruction. The live camera did not create geometry on this phone.' : 'A recorded video is required before PolyScan can reconstruct a real 3D room.'}</p>
           <div className="review-stats" aria-label="Capture summary">
             <span><strong>{selectedKeyframes.length || 0}</strong> viewpoints</span>
             <span><strong>{duration}</strong> capture</span>
           </div>
           <div className="review-actions">
-            <button type="button" className="primary-action" onClick={onProcess}>
-              <span>{hasCapture ? 'Build room viewer' : 'Open room viewer'}</span>
+            <button type="button" className="primary-action" onClick={onProcess} disabled={!hasCapture || !processingAvailable}>
+              <span>{!hasCapture ? 'Video required' : processingAvailable ? 'Reconstruct 3D room' : '3D processing not connected'}</span>
               <span className="action-arrow" aria-hidden="true">↗</span>
             </button>
+            {!processingAvailable && <small className="build-note">Connect the reconstruction API before this capture can become a 3D model.</small>}
             <button type="button" className="text-action" onClick={onScanAgain}>Scan again</button>
           </div>
         </div>
@@ -1155,18 +606,14 @@ function ReviewScreen({ selectedKeyframes, capture, onProcess, onScanAgain }) {
   );
 }
 
-function ProcessingScreen({ selectedKeyframes, capture, buildState, onOpenViewer, onRetry, onBack }) {
+function ProcessingScreen({ buildState, onOpenViewer, onRetry, onBack }) {
   const isWorking = buildState.status === 'uploading' || buildState.status === 'processing';
-  const title = buildState.status === 'local'
-    ? 'Local preview ready.'
-    : buildState.status === 'error'
+  const title = buildState.status === 'error'
       ? 'The room is not built yet.'
       : buildState.status === 'ready'
         ? 'Your room is ready.'
         : 'Building your room.';
-  const description = buildState.status === 'local'
-    ? 'The web capture is saved on this phone. Connect a reconstruction service to turn it into a measured 3D room.'
-    : buildState.status === 'error'
+  const description = buildState.status === 'error'
       ? buildState.error
       : isWorking
         ? 'Keep this page open while the capture uploads and the room is reconstructed.'
@@ -1182,7 +629,7 @@ function ProcessingScreen({ selectedKeyframes, capture, buildState, onOpenViewer
           <span className="build-scan-line" />
         </div>
         <div className="build-copy">
-          <p className="eyebrow">{buildState.status === 'local' ? 'Browser fallback' : 'Spatial processing'}</p>
+          <p className="eyebrow">Spatial processing</p>
           <h1>{title}</h1>
           <p>{description}</p>
           {isWorking && (
@@ -1192,8 +639,7 @@ function ProcessingScreen({ selectedKeyframes, capture, buildState, onOpenViewer
             </div>
           )}
           {buildState.status === 'error' && <button type="button" className="primary-action" onClick={onRetry}><span>Try again</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
-          {(buildState.status === 'local' || buildState.status === 'ready') && <button type="button" className="primary-action" onClick={onOpenViewer}><span>{buildState.status === 'local' ? 'Open local preview' : 'Open room viewer'}</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
-          {capture?.url && buildState.status === 'local' && <small className="build-note">Your video remains on this device until a reconstruction service is connected.</small>}
+          {buildState.status === 'ready' && <button type="button" className="primary-action" onClick={onOpenViewer}><span>Open room viewer</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
         </div>
       </section>
       <button type="button" className="build-back-link" onClick={onBack}>Back to capture review</button>
@@ -1383,7 +829,9 @@ function App() {
       const progress = Math.max(0, Math.min(99, Number(job.progress ?? job.percent ?? 0)));
       setBuildState((current) => ({ ...current, status: 'processing', progress, jobId }));
       if (['complete', 'completed', 'ready', 'succeeded'].includes(status)) {
-        setReconstruction(job.output || job);
+        const output = job.output || job;
+        if (!getReconstructionViewerUrl(output)) throw new Error('Reconstruction finished without a usable 3D viewer URL. The fake local room preview has been disabled.');
+        setReconstruction(output);
         setBuildState({ status: 'ready', progress: 100, jobId, error: null });
         return;
       }
@@ -1396,8 +844,12 @@ function App() {
     buildAbortRef.current?.abort();
     const manifest = createCaptureManifest(scanState, selectedKeyframes);
     setScreen('processing');
-    if (!capture?.blob || !hasReconstructionEndpoint()) {
-      setBuildState({ status: 'local', progress: 100, jobId: null, error: null, manifest });
+    if (!capture?.blob) {
+      setBuildState({ status: 'error', progress: 0, jobId: null, error: 'A recorded room video is required for real 3D reconstruction.', manifest });
+      return;
+    }
+    if (!hasReconstructionEndpoint()) {
+      setBuildState({ status: 'error', progress: 0, jobId: null, error: 'The reconstruction API is not connected. PolyScan will not substitute a fake room model.', manifest });
       return;
     }
 
@@ -1414,7 +866,9 @@ function App() {
       if (!jobId) throw new Error('The reconstruction service did not return a job id.');
       const status = String(job.status || '').toLowerCase();
       if (job.output || ['complete', 'completed', 'ready', 'succeeded'].includes(status)) {
-        setReconstruction(job.output || job);
+        const output = job.output || job;
+        if (!getReconstructionViewerUrl(output)) throw new Error('Reconstruction finished without a usable 3D viewer URL. The fake local room preview has been disabled.');
+        setReconstruction(output);
         setBuildState({ status: 'ready', progress: 100, jobId, error: null });
         return;
       }
@@ -1444,9 +898,9 @@ function App() {
       />
     );
   } else if (screen === 'review') {
-    activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} capture={capture} onProcess={startBuild} onScanAgain={startScan} />;
+    activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} capture={capture} processingAvailable={hasReconstructionEndpoint()} onProcess={startBuild} onScanAgain={startScan} />;
   } else if (screen === 'processing') {
-    activeScreen = <ProcessingScreen selectedKeyframes={selectedKeyframes} capture={capture} buildState={buildState} onOpenViewer={openViewer} onRetry={startBuild} onBack={backToReview} />;
+    activeScreen = <ProcessingScreen buildState={buildState} onOpenViewer={openViewer} onRetry={startBuild} onBack={backToReview} />;
   } else activeScreen = <RoomViewerScreen selectedKeyframes={selectedKeyframes} reconstruction={reconstruction} onBack={() => setScreen('review')} />;
 
   return <div className="App">{activeScreen}</div>;

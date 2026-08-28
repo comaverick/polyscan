@@ -73,7 +73,9 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/t
 
 The scanner is designed as a web-first capture flow. The phone records a supported camera stream and keeps lightweight local coverage guidance. If camera access is unavailable, the launch screen accepts a recorded video from the phone instead.
 
-Without a reconstruction service configured, the app opens an honest local preview. It does not claim that the preview is a measured 3D room.
+The live camera is capture guidance, not a 3D scanner. It records overlapping viewpoints and camera video; it does not tint individual physical surfaces or create geometry in the browser.
+
+Without a reconstruction service configured, the app keeps the capture on the phone and disables the 3D build action. It never substitutes a synthetic room, screen-space polygons, or an unmeasured local model.
 
 ### Connect reconstruction processing
 
@@ -90,6 +92,6 @@ The service must provide these endpoints:
 3. `POST /jobs` accepts `{ captureId, manifest }` and returns `{ id, status }`.
 4. `GET /jobs/:id` returns `{ status, progress, message, output }` while the job runs.
 
-When complete, `output.viewerUrl` can point to a hosted first-person Gaussian Splat or mesh viewer. The existing app embeds that viewer in the room screen. A reconstruction worker should create the visual splat and a metrically scaled mesh separately; AI gap filling should not be used as the source of measurement truth.
+When complete, the job must return `output.viewerUrl` pointing to a hosted first-person Gaussian Splat or mesh viewer. PolyScan rejects a completed job without that URL. A reconstruction worker should create the visual splat and a metrically scaled mesh separately; AI gap filling should not be used as the source of measurement truth.
 
 Keep Vercel as the frontend and API coordinator. Store large videos with direct or multipart uploads and run reconstruction asynchronously in a queue or GPU worker. Do not run the full reconstruction inside the browser or a normal page request.

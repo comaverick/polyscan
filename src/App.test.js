@@ -16,12 +16,13 @@ test('starts with a scan action and no progress UI', () => {
   expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
 });
 
-test('opens the camera surface with an initial blue state and disabled Done action', () => {
+test('opens an honest camera capture surface without a fake mesh overlay', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
   expect(screen.getByRole('button', { name: /done scanning, waiting/i })).toBeDisabled();
-  expect(screen.getByText('Move around the room')).toBeInTheDocument();
-  expect(document.querySelector('.coverage-canvas')).toHaveAttribute('data-coverage-state', 'initial-blue');
+  expect(screen.getByText('Move slowly around the room')).toBeInTheDocument();
+  expect(document.querySelector('.capture-guidance-layer')).toBeInTheDocument();
+  expect(document.querySelector('.coverage-canvas')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Directional room coverage map')).not.toBeInTheDocument();
 });
 
@@ -41,17 +42,15 @@ test('pause stops capture controls without removing the live camera surface', ()
   expect(document.querySelector('video')).toBe(video);
 });
 
-test('viewer measurement tool lets the user place and confirm a distance', () => {
+test('viewer refuses to manufacture a local 3D room', () => {
   render(<RoomViewerScreen selectedKeyframes={[{ thumbnail: 'data:image/jpeg;base64,room' }]} onBack={() => {}} />);
-  fireEvent.click(screen.getByRole('button', { name: 'Measure' }));
-  const stage = screen.getByRole('region', { name: 'Room measurement tool' });
-  Object.defineProperty(stage, 'getBoundingClientRect', { value: () => ({ left: 0, top: 0, width: 100, height: 100 }) });
-  fireEvent.click(stage, { clientX: 20, clientY: 30 });
-  expect(screen.getByText('Tap the second point.')).toBeInTheDocument();
-  fireEvent.click(stage, { clientX: 80, clientY: 70 });
-  fireEvent.change(screen.getByLabelText('Real distance'), { target: { value: '3.2' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Confirm measurement' }));
-  expect(screen.getByText('3.2 m confirmed')).toBeInTheDocument();
+  expect(screen.getByRole('alert')).toHaveTextContent(/no 3d model was produced/i);
+  expect(screen.queryByLabelText(/measurement/i)).not.toBeInTheDocument();
+});
+
+test('viewer embeds only a reconstruction service result', () => {
+  render(<RoomViewerScreen selectedKeyframes={[]} reconstruction={{ viewerUrl: 'https://viewer.example.test/room/1' }} onBack={() => {}} />);
+  expect(screen.getByTitle('Reconstructed 3D room viewer')).toHaveAttribute('src', 'https://viewer.example.test/room/1');
 });
 
 test('keeps live scanning unavailable on desktop browsers', () => {
