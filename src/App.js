@@ -289,8 +289,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const videoRef = useRef(null);
   const analysisCanvasRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
+  const orientationRef = useRef({ yaw: 0, pitch: 0 });
   const [view, setView] = useState({ yaw: 0, pitch: 0 });
-  const [orientation, setOrientation] = useState({ yaw: 0, pitch: 0 });
   const [trackingState, setTrackingState] = useState('searching');
   const [captureState, setCaptureState] = useState('waiting');
 
@@ -321,7 +321,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     const handleOrientation = (event) => {
       const yaw = Number.isFinite(event.alpha) ? event.alpha : 0;
       const pitch = Number.isFinite(event.beta) ? Math.max(-58, Math.min(58, event.beta - 90)) : 0;
-      setOrientation({ yaw, pitch });
+      orientationRef.current = { yaw, pitch };
     };
     window.addEventListener('deviceorientation', handleOrientation, true);
     return () => window.removeEventListener('deviceorientation', handleOrientation, true);
@@ -352,10 +352,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         features: extractFrameFeatures(context, ANALYSIS_WIDTH, ANALYSIS_HEIGHT),
       };
       const current = scanRef.current;
+      const orientation = orientationRef.current;
       const evidence = buildFrameEvidence({
         previousFrame: current.lastFrame,
         currentFrame,
         orientation,
+        referenceViewpoint: current.cameraKeyframes[current.cameraKeyframes.length - 1]?.viewpoint,
         thresholds: DEFAULT_VIEWPOINT_THRESHOLDS,
       });
       const featureTracks = updateFeatureTracks(current.featureTracks, evidence.matches, currentFrame.timestamp);
@@ -403,7 +405,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
     const timer = window.setInterval(captureFrame, CAPTURE_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [onScanStateChange, orientation, paused]);
+  }, [onScanStateChange, paused]);
 
   const keyframeCount = scanState.cameraKeyframes.length;
   const stableTrackCount = scanState.featureTracks.filter((track) => track.observations.length >= 2).length;
@@ -500,7 +502,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         <div className="camera-warning" role="alert">
           <strong>{cameraState === 'requesting' ? 'Allow camera access to begin mapping.' : 'Camera access is needed for live coverage.'}</strong>
           <span>{cameraState === 'requesting' ? 'Choose Allow in the browser prompt.' : 'Open PolyScan on HTTPS and allow camera access.'}</span>
-          {cameraState === 'unavailable' && <button type="button" onClick={onRetryCamera}>Retry camera</button>}
+          {(cameraState === 'unavailable' || cameraState === 'blocked') && <button type="button" onClick={onRetryCamera}>Retry camera</button>}
         </div>
       )}
       <span className="capture-note" role="status">{mappingReady ? 'Mapping active' : captureState === 'frames' ? 'Camera frames active' : ''}</span>
@@ -586,13 +588,18 @@ function App() {
       return;
     }
     cameraRequestRef.current = request;
+    let requestActive = true;
     const timeout = window.setTimeout(() => {
-      if (cameraRequestRef.current === request && cameraSessionRef.current === sessionId) setCameraState('blocked');
+      if (cameraRequestRef.current === request && cameraSessionRef.current === sessionId) {
+        requestActive = false;
+        cameraRequestRef.current = null;
+        setCameraState('blocked');
+      }
     }, 6000);
     request.then((stream) => {
       window.clearTimeout(timeout);
       cameraRequestRef.current = null;
-      if (cameraSessionRef.current !== sessionId) {
+      if (!requestActive || cameraSessionRef.current !== sessionId) {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
@@ -601,9 +608,14 @@ function App() {
     }).catch(() => {
       window.clearTimeout(timeout);
       cameraRequestRef.current = null;
-      if (cameraSessionRef.current === sessionId) setCameraState('unavailable');
+      if (requestActive && cameraSessionRef.current === sessionId) setCameraState('unavailable');
     });
   }, []);
+
+  const retryCamera = useCallback(() => {
+    cameraSessionRef.current += 1;
+    requestCamera(cameraSessionRef.current);
+  }, [requestCamera]);
 
   const startScan = () => {
     cameraSessionRef.current += 1;
@@ -637,7 +649,7 @@ function App() {
         cameraState={cameraState}
         onPause={() => setPaused((value) => !value)}
         onDone={finishScan}
-        onRetryCamera={() => requestCamera(cameraSessionRef.current)}
+        onRetryCamera={retryCamera}
         onScanStateChange={setScanState}
       />
     );

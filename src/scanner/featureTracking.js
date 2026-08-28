@@ -138,7 +138,7 @@ export function updateFeatureTracks(previousTracks = [], matches = [], timestamp
   return [...tracksById.values()];
 }
 
-export function buildFrameEvidence({ previousFrame, currentFrame, orientation = {}, thresholds }) {
+export function buildFrameEvidence({ previousFrame, currentFrame, orientation = {}, referenceViewpoint, thresholds }) {
   const previousFeatures = previousFrame?.features || [];
   const currentFeatures = currentFrame.features || [];
   const matches = matchFrameFeatures(previousFeatures, currentFeatures);
@@ -157,7 +157,7 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
     stableMatches: stableTrackCount,
   };
   const tracking = currentFeatures.length >= 6 && (previousFrame == null || stableTrackCount >= 4);
-  const usefulViewpoint = tracking && isDistinctViewpoint(previousFrame?.viewpoint, viewpoint, thresholds);
+  const usefulViewpoint = tracking && isDistinctViewpoint(referenceViewpoint || previousFrame?.viewpoint, viewpoint, thresholds);
   const stableFeatures = matches
     .filter((match) => match.confidence >= 0.24)
     .map((match) => ({
