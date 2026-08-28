@@ -68,3 +68,28 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+
+## PolyScan web capture
+
+The scanner is designed as a web-first capture flow. The phone records a supported camera stream and keeps lightweight local coverage guidance. If camera access is unavailable, the launch screen accepts a recorded video from the phone instead.
+
+Without a reconstruction service configured, the app opens an honest local preview. It does not claim that the preview is a measured 3D room.
+
+### Connect reconstruction processing
+
+Add this Vercel environment variable:
+
+```text
+REACT_APP_RECONSTRUCTION_API_URL=https://your-reconstruction-service.example.com
+```
+
+The service must provide these endpoints:
+
+1. `POST /uploads` accepts `{ filename, contentType, size, manifest }` and returns `{ uploadUrl, captureId }`.
+2. The browser uploads the video directly to `uploadUrl` with `PUT`.
+3. `POST /jobs` accepts `{ captureId, manifest }` and returns `{ id, status }`.
+4. `GET /jobs/:id` returns `{ status, progress, message, output }` while the job runs.
+
+When complete, `output.viewerUrl` can point to a hosted first-person Gaussian Splat or mesh viewer. The existing app embeds that viewer in the room screen. A reconstruction worker should create the visual splat and a metrically scaled mesh separately; AI gap filling should not be used as the source of measurement truth.
+
+Keep Vercel as the frontend and API coordinator. Store large videos with direct or multipart uploads and run reconstruction asynchronously in a queue or GPU worker. Do not run the full reconstruction inside the browser or a normal page request.

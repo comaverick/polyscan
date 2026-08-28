@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import App from './App';
+import App, { RoomViewerScreen } from './App';
 
 test('starts with a scan action and no progress UI', () => {
   render(<App />);
@@ -30,4 +30,17 @@ test('pause stops capture controls without removing the live camera surface', ()
   fireEvent.click(screen.getByRole('button', { name: /pause/i }));
   expect(screen.getByRole('button', { name: /resume/i })).toBeInTheDocument();
   expect(document.querySelector('video')).toBe(video);
+});
+
+test('viewer measurement tool lets the user place and confirm a distance', () => {
+  render(<RoomViewerScreen selectedKeyframes={[{ thumbnail: 'data:image/jpeg;base64,room' }]} onBack={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Measure' }));
+  const stage = screen.getByRole('region', { name: 'Room measurement tool' });
+  Object.defineProperty(stage, 'getBoundingClientRect', { value: () => ({ left: 0, top: 0, width: 100, height: 100 }) });
+  fireEvent.click(stage, { clientX: 20, clientY: 30 });
+  expect(screen.getByText('Tap the second point.')).toBeInTheDocument();
+  fireEvent.click(stage, { clientX: 80, clientY: 70 });
+  fireEvent.change(screen.getByLabelText('Real distance'), { target: { value: '3.2' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm measurement' }));
+  expect(screen.getByText('3.2 m confirmed')).toBeInTheDocument();
 });

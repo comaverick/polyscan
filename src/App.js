@@ -14,6 +14,12 @@ import {
   extractFrameFeatures,
   updateFeatureTracks,
 } from './scanner/featureTracking';
+import {
+  createCaptureManifest,
+  getReconstructionJob,
+  hasReconstructionEndpoint,
+  submitCapture,
+} from './scanner/reconstructionClient';
 
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
@@ -31,6 +37,7 @@ const createEmptyScanState = () => ({
   lastFrame: null,
   lastViewpoint: null,
   lastEvidence: null,
+  frameCount: 0,
 });
 
 function BrandMark() {
@@ -322,7 +329,7 @@ function CoverageMap({ cells, view, recording, paused, trackingState }) {
   );
 }
 
-function RoomModelCanvas({ rotation, zoom, frameIndex, hasCapture }) {
+function RoomModelCanvas({ rotation, zoom, frameIndex, hasCapture, firstPerson = false }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -360,12 +367,14 @@ function RoomModelCanvas({ rotation, zoom, frameIndex, hasCapture }) {
 
       const angle = (rotation * Math.PI) / 180;
       const focal = Math.min(width, height) * 0.82 * zoom;
+      const cameraDepth = firstPerson ? 3.15 : 5.8;
+      const cameraHeight = firstPerson ? 1.42 : 0;
       const project = ({ x, y, z }) => {
         const rotatedX = x * Math.cos(angle) - z * Math.sin(angle);
         const rotatedZ = x * Math.sin(angle) + z * Math.cos(angle);
-        const depth = Math.max(2.2, 5.8 + rotatedZ);
+        const depth = Math.max(0.72, cameraDepth + rotatedZ);
         const scale = focal / depth;
-        return { x: width / 2 + rotatedX * scale, y: height * 0.59 - y * scale };
+        return { x: width / 2 + rotatedX * scale, y: height * 0.53 - (y - cameraHeight) * scale };
       };
       const line = (points, color, lineWidth = 1) => {
         context.beginPath();
@@ -435,12 +444,12 @@ function RoomModelCanvas({ rotation, zoom, frameIndex, hasCapture }) {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', onResize);
     };
-  }, [frameIndex, hasCapture, rotation, zoom]);
+  }, [firstPerson, frameIndex, hasCapture, rotation, zoom]);
 
   return <canvas ref={canvasRef} className="room-model-canvas" aria-label="Interactive room scan model" />;
 }
 
-function RoomViewerScreen({ selectedKeyframes, onBack }) {
+function RoomViewerScreen({ selectedKeyframes, reconstruction, onBack }) {
   const [frameIndex, setFrameIndex] = useState(1);
   const [rotation, setRotation] = useState(-13);
   const [zoom, setZoom] = useState(1);
@@ -453,28 +462,44 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
     : -1;
   const activeFrame = activeFrameIndex >= 0 ? selectedKeyframes[activeFrameIndex] : null;
   const captureImage = activeFrame?.thumbnail || null;
-  const showModel = activeTool !== 'camera' && activeTool !== 'video';
+  const remoteViewerUrl = reconstruction?.viewerUrl || reconstruction?.viewer?.url || null;
+  const showModel = !remoteViewerUrl && activeTool !== 'camera' && activeTool !== 'video';
   const modeCopy = {
     mesh: ['Mesh view', 'Drag to rotate the room model'],
     walk: ['Walk view', 'Drag across the room to look around'],
     camera: ['Captured view', captureImage ? `Viewpoint ${activeFrameIndex + 1} of ${selectedKeyframes.length}` : 'No captured image is available'],
     layers: ['Scan layers', 'Captured views and the room model are visible'],
-    measure: ['Measure', 'Drag the room model to inspect its surfaces'],
+    measure: ['Measure', 'Tap two points, then confirm the real distance'],
     views: ['Saved views', 'Use the timeline to move between viewpoints'],
     comment: ['Comment', 'Choose a saved viewpoint to discuss'],
     video: ['Capture video', captureImage ? 'Showing the selected camera frame' : 'No captured image is available'],
   }[activeTool] || ['Room model', 'Drag to rotate the room model'];
+  const [measurement, setMeasurement] = useState({ start: null, end: null });
+  const [measurementInput, setMeasurementInput] = useState('');
+  const [confirmedMeasurement, setConfirmedMeasurement] = useState(null);
 
   const handlePointerDown = (event) => {
     event.currentTarget.setPointerCapture?.(event.pointerId);
-    dragRef.current = { x: event.clientX, rotation };
+    dragRef.current = { x: event.clientX, y: event.clientY, rotation };
   };
   const handlePointerMove = (event) => {
-    if (!dragRef.current) return;
+    if (!dragRef.current || activeTool === 'measure') return;
     const delta = event.clientX - dragRef.current.x;
     setRotation(Math.max(-58, Math.min(58, dragRef.current.rotation + delta * 0.18)));
   };
-  const stopDragging = () => { dragRef.current = null; };
+  const handlePointerUp = () => { dragRef.current = null; };
+  const handleStageClick = (event) => {
+    if (activeTool !== 'measure') return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const point = {
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+    };
+    setMeasurement((current) => current.start && current.end ? { start: point, end: null } : current.start ? { ...current, end: point } : { start: point, end: null });
+    setMeasurementInput('');
+    setConfirmedMeasurement(null);
+  };
   const handleWheel = (event) => {
     event.preventDefault();
     setZoom((value) => Math.max(0.78, Math.min(1.35, value - event.deltaY * 0.0008)));
@@ -483,7 +508,23 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
     setFrameIndex(1);
     setRotation(-13);
     setZoom(1);
+    setMeasurement({ start: null, end: null });
+    setMeasurementInput('');
+    setConfirmedMeasurement(null);
     setMenuOpen(false);
+  };
+  const handleToolChange = (tool) => {
+    setActiveTool(tool);
+    if (tool !== 'measure') {
+      setMeasurement({ start: null, end: null });
+      setMeasurementInput('');
+      setConfirmedMeasurement(null);
+    }
+  };
+  const confirmMeasurement = (event) => {
+    event.preventDefault();
+    const distance = Number(measurementInput);
+    if (measurement.start && measurement.end && Number.isFinite(distance) && distance > 0) setConfirmedMeasurement(distance);
   };
   const exportScan = () => {
     const payload = JSON.stringify({ format: 'polyscan-room-viewer', frames: totalFrames, viewpoints: selectedKeyframes.length, createdAt: new Date().toISOString() }, null, 2);
@@ -496,15 +537,39 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
 
   return (
     <main className="room-viewer-screen">
-      <section className="viewer-stage" aria-label="Room viewer" onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={stopDragging} onPointerCancel={stopDragging} onWheel={handleWheel}>
-        {captureImage && <img className="viewer-capture-image" src={captureImage} alt={`Captured room viewpoint ${activeFrameIndex + 1}`} />}
-        {showModel && <RoomModelCanvas rotation={rotation} zoom={zoom} frameIndex={frameIndex} hasCapture={Boolean(captureImage)} />}
+      <section className="viewer-stage" aria-label={activeTool === 'measure' ? 'Room measurement tool' : 'Room viewer'} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { dragRef.current = null; }} onClick={handleStageClick} onWheel={handleWheel}>
+        {remoteViewerUrl && <iframe className="viewer-remote-frame" src={remoteViewerUrl} title="First-person reconstructed room viewer" allow="fullscreen; xr-spatial-tracking" style={{ pointerEvents: activeTool === 'measure' ? 'none' : 'auto' }} />}
+        {!remoteViewerUrl && captureImage && <img className="viewer-capture-image" src={captureImage} alt={`Captured room viewpoint ${activeFrameIndex + 1}`} />}
+        {showModel && <RoomModelCanvas rotation={rotation} zoom={zoom} frameIndex={frameIndex} hasCapture={Boolean(captureImage)} firstPerson={activeTool === 'walk'} />}
         <div className="viewer-vignette" aria-hidden="true" />
         <div className="viewer-crosshair" aria-hidden="true"><span /></div>
         <div className="viewer-stage-caption"><span className="scan-live-dot" /> {modeCopy[0]}</div>
         <div className="viewer-mode-hint"><strong>{modeCopy[0]}</strong><span>{modeCopy[1]}</span></div>
-        {!captureImage && <div className="viewer-empty-note">This scan has no saved camera image. The model preview is still interactive.</div>}
-        <div className="viewer-zoom-controls" aria-label="Room viewer zoom">
+        {!captureImage && !remoteViewerUrl && <div className="viewer-empty-note">This scan has no saved camera image. The model preview is still interactive.</div>}
+        {activeTool === 'measure' && (
+          <>
+            <svg className="viewer-measure-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+              {measurement.start && measurement.end && <line x1={measurement.start.x * 100} y1={measurement.start.y * 100} x2={measurement.end.x * 100} y2={measurement.end.y * 100} />}
+              {measurement.start && <circle cx={measurement.start.x * 100} cy={measurement.start.y * 100} r="1.7" />}
+              {measurement.end && <circle cx={measurement.end.x * 100} cy={measurement.end.y * 100} r="1.7" />}
+            </svg>
+            <div className="viewer-measure-panel" role="status" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+              <strong>Confirm a measurement</strong>
+              {!measurement.start && <span>Tap the first point on the room.</span>}
+              {measurement.start && !measurement.end && <span>Tap the second point.</span>}
+              {measurement.start && measurement.end && !confirmedMeasurement && (
+                <form onSubmit={confirmMeasurement}>
+                  <label htmlFor="measurement-distance">Real distance</label>
+                  <div className="measurement-input-row"><input id="measurement-distance" type="number" min="0.01" step="0.01" inputMode="decimal" value={measurementInput} onChange={(event) => setMeasurementInput(event.target.value)} placeholder="e.g. 3.20" /><span>m</span></div>
+                  <button type="submit" disabled={!measurementInput}>Confirm measurement</button>
+                </form>
+              )}
+              {confirmedMeasurement && <span className="measurement-confirmed">{confirmedMeasurement} m confirmed</span>}
+              {(measurement.start || measurement.end) && <button type="button" className="measurement-clear" onClick={() => { setMeasurement({ start: null, end: null }); setMeasurementInput(''); setConfirmedMeasurement(null); }}>Clear points</button>}
+            </div>
+          </>
+        )}
+        <div className="viewer-zoom-controls" aria-label="Room viewer zoom" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
           <button type="button" onClick={() => setZoom((value) => Math.max(0.78, value - 0.08))} aria-label="Zoom out">-</button>
           <button type="button" onClick={resetViewer} aria-label="Reset room viewer">1:1</button>
           <button type="button" onClick={() => setZoom((value) => Math.min(1.35, value + 0.08))} aria-label="Zoom in">+</button>
@@ -531,7 +596,7 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
 
       <div className="viewer-tool-rail" aria-label="Room viewer tools">
         {[['walk', 'walk', 'Walk'], ['mesh', 'mesh', 'Mesh'], ['camera', 'camera', 'Camera'], ['layers', 'layers', 'Layers']].map(([tool, icon, label]) => (
-          <button key={tool} type="button" className={`viewer-tool-button${activeTool === tool ? ' is-active' : ''}`} onClick={() => setActiveTool(tool)} aria-label={label} aria-pressed={activeTool === tool}>
+          <button key={tool} type="button" className={`viewer-tool-button${activeTool === tool ? ' is-active' : ''}`} onClick={() => handleToolChange(tool)} aria-label={label} aria-pressed={activeTool === tool}>
             <Icon name={icon} size={19} />
             {tool === 'layers' && <span className="tool-alert" aria-hidden="true" />}
           </button>
@@ -550,16 +615,16 @@ function RoomViewerScreen({ selectedKeyframes, onBack }) {
       </div>
 
       <nav className="viewer-bottom-nav" aria-label="Room viewer navigation">
-        <button type="button" onClick={() => setActiveTool('measure')} className={activeTool === 'measure' ? 'is-active' : ''}><Icon name="measure" size={18} /><span>Measure</span></button>
-        <button type="button" onClick={() => setActiveTool('views')} className={activeTool === 'views' ? 'is-active' : ''}><Icon name="eye" size={18} /><span>Views</span></button>
-        <button type="button" onClick={() => setActiveTool('comment')} className={activeTool === 'comment' ? 'is-active' : ''}><Icon name="comment" size={18} /><span>Comment</span></button>
-        <button type="button" onClick={() => setActiveTool('video')} className={activeTool === 'video' ? 'is-active' : ''}><Icon name="video" size={18} /><span>Video</span></button>
+        <button type="button" onClick={() => handleToolChange('measure')} className={activeTool === 'measure' ? 'is-active' : ''}><Icon name="measure" size={18} /><span>Measure</span></button>
+        <button type="button" onClick={() => handleToolChange('views')} className={activeTool === 'views' ? 'is-active' : ''}><Icon name="eye" size={18} /><span>Views</span></button>
+        <button type="button" onClick={() => handleToolChange('comment')} className={activeTool === 'comment' ? 'is-active' : ''}><Icon name="comment" size={18} /><span>Comment</span></button>
+        <button type="button" onClick={() => handleToolChange('video')} className={activeTool === 'video' ? 'is-active' : ''}><Icon name="video" size={18} /><span>Video</span></button>
       </nav>
     </main>
   );
 }
 
-function LaunchScreen({ onStart }) {
+function LaunchScreen({ onStart, onImportCapture }) {
   return (
     <main className="launch-screen">
       <header className="launch-header">
@@ -578,6 +643,19 @@ function LaunchScreen({ onStart }) {
             <span>Start scan</span>
             <span className="action-arrow" aria-hidden="true">↗</span>
           </button>
+          <label className="launch-import-action">
+            <span>Use a recorded video</span>
+            <input
+              type="file"
+              accept="video/*"
+              capture="environment"
+              onChange={(event) => {
+                const [file] = event.target.files || [];
+                if (file) onImportCapture(file);
+                event.target.value = '';
+              }}
+            />
+          </label>
         </div>
 
         <div className="launch-visual" aria-label="Room scan preview">
@@ -603,7 +681,7 @@ function LaunchScreen({ onStart }) {
   );
 }
 
-function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, onRetryCamera, onCancel }) {
+function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, onRetryCamera, onCancel, onImportCapture }) {
   const videoRef = useRef(null);
   const analysisCanvasRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
@@ -613,6 +691,10 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const [captureState, setCaptureState] = useState('waiting');
   const [recording, setRecording] = useState(false);
   const [modeOpen, setModeOpen] = useState(false);
+  const recorderRef = useRef(null);
+  const recorderChunksRef = useRef([]);
+  const recordingStartedAtRef = useRef(0);
+  const [recordingError, setRecordingError] = useState('');
 
   const resumeCamera = useCallback(() => {
     const video = videoRef.current;
@@ -657,6 +739,94 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   useEffect(() => {
     scanRef.current = scanState;
   }, [scanState]);
+
+  useEffect(() => {
+    if (!cameraStream) return undefined;
+    if (!window.MediaRecorder) {
+      setRecordingError('Video recording is unavailable in this browser. Keyframes will still be saved.');
+      return undefined;
+    }
+
+    const supportedTypes = [
+      'video/mp4;codecs=h264',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm',
+    ];
+    const mimeType = supportedTypes.find((type) => {
+      try {
+        return !window.MediaRecorder.isTypeSupported || window.MediaRecorder.isTypeSupported(type);
+      } catch {
+        return false;
+      }
+    });
+
+    let recorder;
+    try {
+      recorder = new window.MediaRecorder(cameraStream, mimeType ? { mimeType } : undefined);
+    } catch {
+      setRecordingError('Video recording is unavailable in this browser. Keyframes will still be saved.');
+      return undefined;
+    }
+
+    recorderChunksRef.current = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data?.size) recorderChunksRef.current.push(event.data);
+    };
+    recorder.onerror = () => setRecordingError('The browser stopped recording. Your saved viewpoints are still available.');
+    recorderRef.current = recorder;
+    recordingStartedAtRef.current = performance.now();
+    setRecordingError('');
+    try {
+      recorder.start(1000);
+    } catch {
+      recorderRef.current = null;
+      setRecordingError('Video recording could not start. Your saved viewpoints are still available.');
+    }
+
+    return () => {
+      if (recorderRef.current !== recorder) return;
+      if (recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch { /* The browser may already have stopped the stream. */ }
+      }
+      recorderRef.current = null;
+    };
+  }, [cameraStream]);
+
+  useEffect(() => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === 'inactive') return;
+    try {
+      const shouldRecord = recording && !paused;
+      if (!shouldRecord && recorder.state === 'recording') recorder.pause();
+      if (shouldRecord && recorder.state === 'paused') recorder.resume();
+    } catch {
+      setRecordingError('The browser could not pause or resume the video. Your saved viewpoints are still available.');
+    }
+  }, [paused, recording]);
+
+  const stopCaptureRecording = useCallback(() => new Promise((resolve) => {
+    const recorder = recorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      const chunks = recorderChunksRef.current;
+      recorderChunksRef.current = [];
+      resolve(chunks.length ? { blob: new Blob(chunks, { type: recorder?.mimeType || chunks[0].type || 'video/webm' }), durationMs: Math.max(0, performance.now() - recordingStartedAtRef.current) } : null);
+      return;
+    }
+    const finalize = () => {
+      const chunks = recorderChunksRef.current;
+      recorderChunksRef.current = [];
+      recorderRef.current = null;
+      if (!chunks.length) {
+        resolve(null);
+        return;
+      }
+      const blob = new Blob(chunks, { type: recorder.mimeType || chunks[0].type || 'video/webm' });
+      resolve({ blob, durationMs: Math.max(0, performance.now() - recordingStartedAtRef.current) });
+    };
+    recorder.addEventListener('stop', finalize, { once: true });
+    try { recorder.stop(); } catch { finalize(); }
+  }), []);
 
   useEffect(() => {
     if (paused || !recording) return undefined;
@@ -728,6 +898,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         directionalCoverage: nextCoverage,
         cameraKeyframes: nextKeyframes,
         featureTracks,
+        frameCount: (current.frameCount || 0) + 1,
         distinctViewpoints: current.distinctViewpoints + (evidence.usefulViewpoint ? 1 : 0),
         meaningfulCameraMotion: current.meaningfulCameraMotion || evidence.usefulViewpoint,
         stableFeatures: evidence.stableFeatures,
@@ -782,6 +953,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         : recording
           ? 'Scanning'
           : 'Ready';
+  const handleDone = async () => {
+    const capture = await stopCaptureRecording();
+    setRecording(false);
+    onDone(selectBestKeyframes(scanState.cameraKeyframes), capture, scanState);
+  };
 
   return (
     <main className="scan-screen" onPointerDown={resumeCamera}>
@@ -865,7 +1041,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           <button
             type="button"
             className="scan-done-button"
-            onClick={() => onDone(selectBestKeyframes(scanState.cameraKeyframes))}
+            onClick={handleDone}
             disabled={!viable}
             aria-label={viable ? 'Done scanning' : 'Done scanning, waiting for basic map'}
           >
@@ -879,46 +1055,88 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           <strong>{cameraState === 'requesting' ? 'Allow camera access to begin mapping.' : 'Camera access is needed for live coverage.'}</strong>
           <span>{cameraState === 'requesting' ? 'Choose Allow in the browser prompt.' : 'Open PolyScan on HTTPS and allow camera access.'}</span>
           {(cameraState === 'unavailable' || cameraState === 'blocked') && <button type="button" onClick={onRetryCamera}>Retry camera</button>}
+          {(cameraState === 'unavailable' || cameraState === 'blocked') && <label className="camera-upload-action"><span>Use a recorded video</span><input type="file" accept="video/*" onChange={(event) => { const [file] = event.target.files || []; if (file) onImportCapture(file); event.target.value = ''; }} /></label>}
         </div>
       )}
+      {recordingError && <div className="capture-warning" role="status">{recordingError}</div>}
       <span className="capture-note" role="status">{mappingReady ? 'Mapping active' : captureState === 'frames' ? 'Camera frames active' : ''}</span>
     </main>
   );
 }
 
-function ReviewScreen({ selectedKeyframes, onProcess, onScanAgain }) {
+function ReviewScreen({ selectedKeyframes, capture, onProcess, onScanAgain }) {
   const preview = selectedKeyframes.find((frame) => frame.thumbnail)?.thumbnail;
+  const hasCapture = Boolean(capture?.blob);
+  const duration = capture?.durationMs ? `${Math.max(1, Math.round(capture.durationMs / 1000))}s` : hasCapture ? 'Video' : selectedKeyframes.length ? 'Local' : 'None';
   return (
     <main className="review-screen capture-review-screen">
       <header className="review-header"><Wordmark /><span className="review-top-label">Capture review</span></header>
       <section className="capture-review-content">
         <div className="review-preview-card">
-          {preview ? <img src={preview} alt="Selected room viewpoint" /> : <div className="review-preview-placeholder" aria-hidden="true"><div /><span /></div>}
-          <div className="review-preview-overlay"><span className="scan-live-dot" /> Ready to build</div>
+          {capture?.url ? <video className="review-capture-video" src={capture.url} controls playsInline preload="metadata" aria-label="Recorded room capture" /> : preview ? <img src={preview} alt="Selected room viewpoint" /> : <div className="review-preview-placeholder" aria-hidden="true"><div /><span /></div>}
+          <div className="review-preview-overlay"><span className="scan-live-dot" /> {hasCapture ? 'Video ready' : 'Local preview ready'}</div>
         </div>
         <div className="review-copy-block">
           <p className="eyebrow">Scan complete</p>
           <h1>Review your<br /><span>room capture.</span></h1>
-          <p>We held the strongest viewpoints locally. Build the room viewer when the capture looks right.</p>
+          <p>{hasCapture ? 'Your video is ready to upload for reconstruction. You can preview it before building the room.' : 'We held the strongest viewpoints locally. Open the preview now or add a recorded video for reconstruction.'}</p>
           <div className="review-stats" aria-label="Capture summary">
             <span><strong>{selectedKeyframes.length || 0}</strong> viewpoints</span>
-            <span><strong>{selectedKeyframes.length ? 172 : 0}</strong> frames ready</span>
+            <span><strong>{duration}</strong> capture</span>
           </div>
-        <div className="review-actions">
-          <button type="button" className="primary-action" onClick={onProcess}>
-            <span>Open room viewer</span>
-            <span className="action-arrow" aria-hidden="true">↗</span>
-          </button>
-          <button type="button" className="text-action" onClick={onScanAgain}>Scan again</button>
-        </div>
+          <div className="review-actions">
+            <button type="button" className="primary-action" onClick={onProcess}>
+              <span>{hasCapture ? 'Build room viewer' : 'Open room viewer'}</span>
+              <span className="action-arrow" aria-hidden="true">↗</span>
+            </button>
+            <button type="button" className="text-action" onClick={onScanAgain}>Scan again</button>
+          </div>
         </div>
       </section>
     </main>
   );
 }
 
-function ProcessingScreen({ selectedKeyframes, onBack }) {
-  return <RoomViewerScreen selectedKeyframes={selectedKeyframes} onBack={onBack} />;
+function ProcessingScreen({ selectedKeyframes, capture, buildState, onOpenViewer, onRetry, onBack }) {
+  const isWorking = buildState.status === 'uploading' || buildState.status === 'processing';
+  const title = buildState.status === 'local'
+    ? 'Local preview ready.'
+    : buildState.status === 'error'
+      ? 'The room is not built yet.'
+      : buildState.status === 'ready'
+        ? 'Your room is ready.'
+        : 'Building your room.';
+  const description = buildState.status === 'local'
+    ? 'The web capture is saved on this phone. Connect a reconstruction service to turn it into a measured 3D room.'
+    : buildState.status === 'error'
+      ? buildState.error
+      : isWorking
+        ? 'Keep this page open while the capture uploads and the room is reconstructed.'
+        : 'A room viewer will appear here when processing is complete.';
+  return (
+    <main className="build-screen">
+      <header className="build-header"><button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to capture review"><Icon name="back" size={19} /></button><Wordmark compact /><span className="build-header-label">Room build</span></header>
+      <section className="build-content">
+        <div className="build-visual" aria-hidden="true">
+          <div className="build-orbit build-orbit-one" />
+          <div className="build-orbit build-orbit-two" />
+          <div className="build-room-outline" />
+          <span className="build-scan-line" />
+        </div>
+        <div className="build-copy">
+          <p className="eyebrow">{buildState.status === 'local' ? 'Browser fallback' : 'Spatial processing'}</p>
+          <h1>{title}</h1>
+          <p>{description}</p>
+          {isWorking && <div className="build-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={buildState.progress} aria-label="Room build progress"><span style={{ width: `${buildState.progress}%` }} /></div>}
+          {isWorking && <div className="build-progress-label"><span>{buildState.status === 'uploading' ? 'Uploading capture' : 'Reconstructing room'}</span><strong>{buildState.progress}%</strong></div>}
+          {buildState.status === 'error' && <button type="button" className="primary-action" onClick={onRetry}><span>Try again</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
+          {(buildState.status === 'local' || buildState.status === 'ready') && <button type="button" className="primary-action" onClick={onOpenViewer}><span>{buildState.status === 'local' ? 'Open local preview' : 'Open room viewer'}</span><span className="action-arrow" aria-hidden="true">↗</span></button>}
+          {capture?.url && buildState.status === 'local' && <small className="build-note">Your video remains on this device until a reconstruction service is connected.</small>}
+        </div>
+      </section>
+      <button type="button" className="build-back-link" onClick={onBack}>Back to capture review</button>
+    </main>
+  );
 }
 
 function App() {
@@ -926,10 +1144,40 @@ function App() {
   const [paused, setPaused] = useState(false);
   const [scanState, setScanState] = useState(createEmptyScanState);
   const [selectedKeyframes, setSelectedKeyframes] = useState([]);
+  const [capture, setCapture] = useState(null);
+  const [reconstruction, setReconstruction] = useState(null);
+  const [buildState, setBuildState] = useState({ status: 'idle', progress: 0, jobId: null, error: null });
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraState, setCameraState] = useState('idle');
   const cameraRequestRef = useRef(null);
   const cameraSessionRef = useRef(0);
+  const captureUrlRef = useRef(null);
+  const buildAbortRef = useRef(null);
+
+  const clearCapture = useCallback(() => {
+    if (captureUrlRef.current) {
+      URL.revokeObjectURL(captureUrlRef.current);
+      captureUrlRef.current = null;
+    }
+    setCapture(null);
+  }, []);
+
+  const saveCapture = useCallback((nextCapture) => {
+    if (captureUrlRef.current) URL.revokeObjectURL(captureUrlRef.current);
+    if (!nextCapture?.blob) {
+      captureUrlRef.current = null;
+      setCapture(null);
+      return;
+    }
+    const url = typeof URL.createObjectURL === 'function' ? URL.createObjectURL(nextCapture.blob) : null;
+    captureUrlRef.current = url;
+    setCapture({ ...nextCapture, url });
+  }, []);
+
+  useEffect(() => () => {
+    if (captureUrlRef.current) URL.revokeObjectURL(captureUrlRef.current);
+    buildAbortRef.current?.abort();
+  }, []);
 
   const stopCamera = useCallback(() => {
     setCameraStream((stream) => {
@@ -946,16 +1194,29 @@ function App() {
     }
     setCameraState('requesting');
     let request;
+    const preferredConstraints = {
+      audio: false,
+      video: {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+    };
     try {
-      request = navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
+      request = navigator.mediaDevices.getUserMedia(preferredConstraints).catch((error) => {
+        if (error?.name !== 'OverconstrainedError' && error?.name !== 'NotFoundError') throw error;
+        return navigator.mediaDevices.getUserMedia({ audio: false, video: true });
       });
     } catch {
+      setCameraState('unavailable');
+      return;
+    }
+    /*
+     * Some phones reject ideal rear-camera constraints even though they can
+     * open a normal camera stream. The fallback above keeps the scanner useful
+     * instead of leaving the user on an endless loading state.
+     */
+    if (!request) {
       setCameraState('unavailable');
       return;
     }
@@ -1000,6 +1261,10 @@ function App() {
   const startScan = () => {
     cameraSessionRef.current += 1;
     stopCamera();
+    buildAbortRef.current?.abort();
+    clearCapture();
+    setReconstruction(null);
+    setBuildState({ status: 'idle', progress: 0, jobId: null, error: null });
     setCameraState('requesting');
     if (typeof window.DeviceOrientationEvent?.requestPermission === 'function') {
       window.DeviceOrientationEvent.requestPermission().catch(() => {});
@@ -1010,16 +1275,95 @@ function App() {
     requestCamera(cameraSessionRef.current);
   };
 
-  const finishScan = (keyframes) => {
+  const finishScan = (keyframes, recordedCapture, scanSnapshot) => {
     cameraSessionRef.current += 1;
     stopCamera();
     setCameraState('idle');
     setSelectedKeyframes(keyframes);
+    saveCapture(recordedCapture);
+    setReconstruction(null);
+    setBuildState({ status: 'idle', progress: 0, jobId: null, error: null, manifest: createCaptureManifest(scanSnapshot, keyframes) });
     setScreen('review');
   };
 
+  const importCapture = (file) => {
+    if (!file || !file.type.startsWith('video/')) return;
+    cameraSessionRef.current += 1;
+    stopCamera();
+    clearCapture();
+    saveCapture({ blob: file, mimeType: file.type, durationMs: 0, imported: true });
+    setSelectedKeyframes([]);
+    setReconstruction(null);
+    setBuildState({ status: 'idle', progress: 0, jobId: null, error: null });
+    setScreen('review');
+  };
+
+  const openViewer = () => setScreen('viewer');
+  const backToReview = () => {
+    buildAbortRef.current?.abort();
+    setScreen('review');
+  };
+
+  const pollReconstruction = useCallback(async (jobId, controller) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 30 * 60 * 1000) {
+      await new Promise((resolve, reject) => {
+        const timer = window.setTimeout(resolve, 1600);
+        controller.signal.addEventListener('abort', () => {
+          window.clearTimeout(timer);
+          reject(new DOMException('Build cancelled', 'AbortError'));
+        }, { once: true });
+      });
+      const job = await getReconstructionJob(jobId, { signal: controller.signal });
+      const status = String(job.status || 'processing').toLowerCase();
+      const progress = Math.max(0, Math.min(99, Number(job.progress ?? job.percent ?? 0)));
+      setBuildState((current) => ({ ...current, status: 'processing', progress, jobId }));
+      if (['complete', 'completed', 'ready', 'succeeded'].includes(status)) {
+        setReconstruction(job.output || job);
+        setBuildState({ status: 'ready', progress: 100, jobId, error: null });
+        return;
+      }
+      if (['failed', 'error', 'cancelled'].includes(status)) throw new Error(job.message || 'The reconstruction service could not build this room.');
+    }
+    throw new Error('The reconstruction is taking longer than expected. You can try again without losing the capture.');
+  }, []);
+
+  const startBuild = useCallback(() => {
+    buildAbortRef.current?.abort();
+    const manifest = createCaptureManifest(scanState, selectedKeyframes);
+    setScreen('processing');
+    if (!capture?.blob || !hasReconstructionEndpoint()) {
+      setBuildState({ status: 'local', progress: 100, jobId: null, error: null, manifest });
+      return;
+    }
+
+    const controller = new AbortController();
+    buildAbortRef.current = controller;
+    setBuildState({ status: 'uploading', progress: 0, jobId: null, error: null, manifest });
+    submitCapture({
+      blob: capture.blob,
+      manifest,
+      signal: controller.signal,
+      onProgress: (progress) => setBuildState((current) => ({ ...current, status: 'uploading', progress })),
+    }).then(async (job) => {
+      const jobId = job.id || job.jobId;
+      if (!jobId) throw new Error('The reconstruction service did not return a job id.');
+      const status = String(job.status || '').toLowerCase();
+      if (job.output || ['complete', 'completed', 'ready', 'succeeded'].includes(status)) {
+        setReconstruction(job.output || job);
+        setBuildState({ status: 'ready', progress: 100, jobId, error: null });
+        return;
+      }
+      setBuildState({ status: 'processing', progress: Math.max(94, Number(job.progress || 0)), jobId, error: null });
+      await pollReconstruction(jobId, controller);
+    }).catch((error) => {
+      if (error?.name === 'AbortError') return;
+      setBuildState({ status: 'error', progress: 0, jobId: null, error: error.message || 'The room could not be built.', manifest });
+    });
+  }, [capture, pollReconstruction, scanState, selectedKeyframes]);
+
   let activeScreen;
-  if (screen === 'launch') activeScreen = <LaunchScreen onStart={startScan} />;
+  if (screen === 'launch') activeScreen = <LaunchScreen onStart={startScan} onImportCapture={importCapture} />;
   else if (screen === 'scan') {
     activeScreen = (
       <ScanScreen
@@ -1031,15 +1375,18 @@ function App() {
         onDone={finishScan}
         onRetryCamera={retryCamera}
         onCancel={cancelScan}
+        onImportCapture={importCapture}
         onScanStateChange={setScanState}
       />
     );
   } else if (screen === 'review') {
-    activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} onProcess={() => setScreen('processing')} onScanAgain={startScan} />;
-  } else activeScreen = <ProcessingScreen selectedKeyframes={selectedKeyframes} onBack={() => setScreen('review')} />;
+    activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} capture={capture} onProcess={startBuild} onScanAgain={startScan} />;
+  } else if (screen === 'processing') {
+    activeScreen = <ProcessingScreen selectedKeyframes={selectedKeyframes} capture={capture} buildState={buildState} onOpenViewer={openViewer} onRetry={startBuild} onBack={backToReview} />;
+  } else activeScreen = <RoomViewerScreen selectedKeyframes={selectedKeyframes} reconstruction={reconstruction} onBack={() => setScreen('review')} />;
 
   return <div className="App">{activeScreen}</div>;
 }
 
-export { App, ScanScreen, createEmptyScanState };
+export { App, RoomViewerScreen, ScanScreen, createEmptyScanState };
 export default App;
