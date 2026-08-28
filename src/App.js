@@ -401,7 +401,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
         parallax: evidence.parallax,
       });
 
-      const nextKeyframes = evidence.tracking
+      const isFirstKeyframe = current.cameraKeyframes.length === 0;
+      const nextKeyframes = evidence.tracking && (isFirstKeyframe || evidence.usefulViewpoint)
         ? [...current.cameraKeyframes, {
           id: `keyframe-${current.cameraKeyframes.length + 1}`,
           timestamp: currentFrame.timestamp,
@@ -514,6 +515,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange }) {
           </button>
         </div>
       </div>
+      {cameraState === 'unavailable' && (
+        <div className="camera-warning" role="alert">
+          <strong>Camera access is needed for live coverage.</strong>
+          <span>Open PolyScan on HTTPS and allow camera access.</span>
+        </div>
+      )}
       <span className="capture-note" aria-hidden="true">{mapVersion > 0 && 'Local map active'}</span>
     </main>
   );

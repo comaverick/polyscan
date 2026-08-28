@@ -41,21 +41,21 @@ function colorAt(data, width, x, y) {
   return { r: data[index], g: data[index + 1], b: data[index + 2] };
 }
 
-export function extractFrameFeatures(context, width, height, maximum = 48) {
+export function extractFrameFeatures(context, width, height, maximum = 64) {
   const image = context.getImageData(0, 0, width, height);
   const candidates = [];
   const data = image.data;
-  for (let y = 12; y < height - 12; y += 16) {
-    for (let x = 12; x < width - 12; x += 16) {
+  for (let y = 12; y < height - 12; y += 12) {
+    for (let x = 12; x < width - 12; x += 12) {
       const score = featureScore(data, width, height, x, y);
-      if (score >= 24) candidates.push({ x, y, score });
+      if (score >= 14) candidates.push({ x, y, score });
     }
   }
   candidates.sort((first, second) => second.score - first.score);
   const selected = [];
   candidates.forEach((candidate) => {
     if (selected.length >= maximum) return;
-    const tooClose = selected.some((feature) => Math.hypot(feature.x - candidate.x, feature.y - candidate.y) < 20);
+    const tooClose = selected.some((feature) => Math.hypot(feature.x - candidate.x, feature.y - candidate.y) < 18);
     if (tooClose) return;
     selected.push({
       id: `feature-${selected.length}`,

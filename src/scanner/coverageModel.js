@@ -2,7 +2,7 @@ export const DEFAULT_VIEWPOINT_THRESHOLDS = Object.freeze({
   translationMeters: 0.18,
   angleDegrees: 12,
   parallax: 0.075,
-  minStableMatches: 6,
+  minStableMatches: 4,
 });
 
 export const MIN_VIABLE_SCAN = Object.freeze({
