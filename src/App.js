@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
 import {
   DEFAULT_VIEWPOINT_THRESHOLDS,
-  coverageOpacity,
   createDirectionalCoverage,
   getVisibleCellIds,
   isReconstructionViable,
@@ -212,7 +211,7 @@ function CoverageCanvas({
       context.restore();
     };
 
-    const drawUnscannedPixels = (context, width, height) => {
+    const drawCoverageTexture = (context, width, height) => {
       const yawBins = cells[0]?.yawBins || 20;
       const yawSize = 360 / yawBins;
       const now = performance.now();
@@ -220,9 +219,6 @@ function CoverageCanvas({
       context.globalCompositeOperation = 'screen';
       cells.forEach((cell, cellIndex) => {
         const coverage = displayedRef.current.get(cell.id) ?? cell.coverage;
-        const missing = 1 - coverage;
-        if (missing < 0.08) return;
-
         const cellYaw = cell.yawIndex * yawSize + yawSize / 2;
         const yawDelta = ((cellYaw - view.yaw + 540) % 360) - 180;
         const pitchCenter = cell.pitchBand === 0 ? 24 : cell.pitchBand === 1 ? 0 : -24;
@@ -235,16 +231,53 @@ function CoverageCanvas({
         const cellHeight = height / 3.02;
         if (centerX + cellWidth / 2 < 0 || centerX - cellWidth / 2 > width || centerY + cellHeight / 2 < 0 || centerY - cellHeight / 2 > height) return;
 
-        const pixelCount = Math.round(9 + missing * 25);
-        const baseOpacity = Math.min(0.78, Math.max(0.15, coverageOpacity(coverage) + missing * 0.16));
+        const isUnscanned = coverage < 0.2;
+        const unknownAmount = Math.max(0, Math.min(1, 1 - coverage / 0.2));
+        const textureAmount = Math.max(0.25, Math.min(1, coverage));
+        const pixelCount = isUnscanned ? Math.round(18 + unknownAmount * 24) : Math.round(14 + textureAmount * 24);
+        const texturePoints = [];
         for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex += 1) {
           const seed = cellIndex * 101 + pixelIndex * 17;
-          const x = centerX - cellWidth / 2 + deterministicNoise(seed + 1) * cellWidth;
-          const y = centerY - cellHeight / 2 + deterministicNoise(seed + 2) * cellHeight;
+          const depth = deterministicNoise(seed + 4);
+          const depthScale = isUnscanned ? 1 : 0.72 + depth * 0.28;
+          const x = centerX + (deterministicNoise(seed + 1) - 0.5) * cellWidth * depthScale;
+          const y = centerY + (deterministicNoise(seed + 2) - 0.5) * cellHeight * depthScale;
           const flicker = 0.78 + Math.sin(now / 260 + seed) * 0.22;
-          const size = pixelIndex % 7 === 0 ? 2 : 1;
-          context.fillStyle = `rgba(55, 184, 255, ${baseOpacity * flicker})`;
-          context.fillRect(Math.round(x), Math.round(y), size, size);
+          if (isUnscanned) {
+            const size = pixelIndex % 6 === 0 ? 2 : 1;
+            const blueOpacity = (0.16 + unknownAmount * 0.5) * flicker;
+            context.fillStyle = `rgba(44, 169, 255, ${blueOpacity})`;
+            context.fillRect(Math.round(x), Math.round(y), size, size);
+          } else {
+            texturePoints.push({ x, y, depth });
+          }
+        }
+
+        if (!isUnscanned && texturePoints.length) {
+          context.lineWidth = 0.7;
+          for (let pointIndex = 1; pointIndex < texturePoints.length; pointIndex += 2) {
+            const point = texturePoints[pointIndex];
+            let closest = null;
+            let closestDistance = Infinity;
+            texturePoints.slice(0, pointIndex).forEach((candidate) => {
+              const distance = Math.hypot(candidate.x - point.x, candidate.y - point.y);
+              if (distance < closestDistance) {
+                closest = candidate;
+                closestDistance = distance;
+              }
+            });
+            if (!closest || closestDistance > Math.max(cellWidth, cellHeight) * 0.38) continue;
+            context.strokeStyle = `rgba(186, 237, 255, ${0.1 + textureAmount * 0.2})`;
+            context.beginPath();
+            context.moveTo(closest.x, closest.y);
+            context.lineTo(point.x, point.y);
+            context.stroke();
+          }
+          texturePoints.forEach((point, pointIndex) => {
+            const size = pointIndex % 7 === 0 ? 2 : 1;
+            context.fillStyle = `rgba(213, 249, 255, ${(0.24 + textureAmount * 0.45) * (0.7 + point.depth * 0.3)})`;
+            context.fillRect(Math.round(point.x), Math.round(point.y), size, size);
+          });
         }
       });
       context.restore();
@@ -281,7 +314,7 @@ function CoverageCanvas({
         context.fillRect(0, 0, width, height);
       }
 
-      drawUnscannedPixels(context, width, height);
+      drawCoverageTexture(context, width, height);
       drawTrackedFeatures(context, width, height);
       drawGeometry(context, width, height);
       frameId = window.requestAnimationFrame(draw);
