@@ -102,7 +102,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
     response.writeHead(204, {
       'Access-Control-Allow-Origin': process.env.ALLOWED_ORIGIN || '*',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, bypass-tunnel-reminder',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,OPTIONS',
     });
     response.end();

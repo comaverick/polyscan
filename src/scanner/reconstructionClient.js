@@ -13,6 +13,7 @@ function requestJson(url, options = {}) {
     ...options,
     headers: {
       Accept: 'application/json',
+      'bypass-tunnel-reminder': 'true',
       ...(options.headers || {}),
     },
   }).then(async (response) => {
@@ -28,6 +29,7 @@ function uploadWithProgress(url, blob, onProgress, signal) {
     const request = new XMLHttpRequest();
     request.open('PUT', url);
     request.setRequestHeader('Content-Type', blob.type || 'application/octet-stream');
+    request.setRequestHeader('bypass-tunnel-reminder', 'true');
     request.upload.onprogress = (event) => onProgress(event.loaded, event.lengthComputable ? event.total : blob.size);
     request.onload = () => {
       if (request.status >= 200 && request.status < 300) resolve();
