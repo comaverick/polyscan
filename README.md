@@ -60,22 +60,20 @@ Requirements:
 - FFmpeg is required only when reconstructing an imported video without enough saved image keyframes
 - At least 12 overlapping images; 40 or more is recommended for a room
 
-Copy `.env.example` to `.env.local` for the React app, then set the environment variables in your terminal before running the worker. Create React App does not automatically expose worker-only variables from `.env.local` to Node.
+Copy `.env.example` to `.env` for the local reconstruction worker. The worker loads this file automatically at startup. The React build only exposes variables beginning with `REACT_APP_`.
 
 ```powershell
 $env:REACT_APP_RECONSTRUCTION_API_URL='http://127.0.0.1:8787'
-$env:PUBLIC_BASE_URL='http://127.0.0.1:8787'
-$env:ALLOWED_ORIGIN='http://localhost:3000'
-$env:COLMAP_PATH='C:\path\to\COLMAP\bin\colmap.exe'
 npm run reconstruction-server
 ```
 
 In a second terminal:
 
 ```powershell
-$env:REACT_APP_RECONSTRUCTION_API_URL='http://127.0.0.1:8787'
 npm start
 ```
+
+For a Vercel deployment using a temporary tunnel, set `PUBLIC_BASE_URL` in the PC `.env` to the tunnel URL and set the same URL as Vercel's `REACT_APP_RECONSTRUCTION_API_URL` environment variable. Keep that `REACT_APP_` prefix: this URL must be available to the phone browser. Restart the worker after changing `.env`, and keep the tunnel running while scanning.
 
 For a phone on the same network, `PUBLIC_BASE_URL` and `REACT_APP_RECONSTRUCTION_API_URL` must use the computer's reachable HTTPS address, not `127.0.0.1`.
 

@@ -2,7 +2,23 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
+
+// Keep the worker self-contained: Node does not load .env files by default,
+// and this server is also run directly outside the React toolchain.
+function loadLocalEnv(filename) {
+  if (!fs.existsSync(filename)) return;
+  fs.readFileSync(filename, 'utf8').split(/\r?\n/).forEach((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (!match || process.env[match[1]] !== undefined) return;
+    let value = match[2];
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    process.env[match[1]] = value;
+  });
+}
+
+loadLocalEnv(path.resolve(__dirname, '..', '.env'));
 const { runColmapPipeline } = require('./colmap-worker.cjs');
 
 const port = Number(process.env.PORT || 8787);
@@ -112,7 +128,13 @@ const server = http.createServer(async (request, response) => {
 
   try {
     if (request.method === 'GET' && url.pathname === '/health') {
-      sendJson(response, 200, { ok: true, service: 'polyscan-reconstruction' });
+      sendJson(response, 200, {
+        ok: true,
+        service: 'polyscan-reconstruction',
+        publicBaseUrl,
+        colmapConfigured: Boolean(process.env.COLMAP_PATH),
+        ffmpegConfigured: Boolean(process.env.FFMPEG_PATH),
+      });
       return;
     }
 

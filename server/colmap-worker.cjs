@@ -108,8 +108,22 @@ async function runColmapPipeline({ captureDirectory, assets, workspace, onProgre
 
   const modelPath = path.join(workspace, 'room.ply');
   onProgress(91, 'Building the walkable mesh');
-  await run(colmap, ['poisson_mesher', '--input_path', fusedPath, '--output_path', modelPath], { cwd: workspace });
-  if (!fs.existsSync(modelPath)) throw new Error('COLMAP completed without producing a room mesh.');
+  try {
+    await run(colmap, ['poisson_mesher', '--input_path', fusedPath, '--output_path', modelPath], { cwd: workspace });
+  } catch (error) {
+    // A dense fused cloud is still useful when Poisson cannot close a surface
+    // (common with plain walls, glass, or a short phone capture). Returning it
+    // lets the first-person viewer open instead of throwing away the build.
+    if (!fs.existsSync(fusedPath)) throw error;
+    fs.copyFileSync(fusedPath, modelPath);
+    onProgress(96, 'Surface mesh incomplete; preparing the scanned point cloud');
+    return { modelPath, imageCount, format: 'ply', kind: 'pointcloud', pointSize: 0.022 };
+  }
+  if (!fs.existsSync(modelPath)) {
+    if (!fs.existsSync(fusedPath)) throw new Error('COLMAP completed without producing a room model.');
+    fs.copyFileSync(fusedPath, modelPath);
+    return { modelPath, imageCount, format: 'ply', kind: 'pointcloud', pointSize: 0.022 };
+  }
   onProgress(100, 'Room ready');
   return { modelPath, imageCount, format: 'ply', kind: 'mesh' };
 }
