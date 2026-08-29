@@ -21,6 +21,7 @@ import {
   resolveKeyframeAssets,
 } from './scanner/keyframeCapture';
 import {
+  checkReconstructionService,
   createCaptureManifest,
   getReconstructionJob,
   hasReconstructionEndpoint,
@@ -1025,13 +1026,13 @@ function App() {
     const controller = new AbortController();
     buildAbortRef.current = controller;
     setBuildState({ status: 'uploading', progress: 0, jobId: null, error: null, manifest });
-    submitCapture({
+    checkReconstructionService({ signal: controller.signal }).then(() => submitCapture({
       capture,
       keyframes: selectedKeyframes,
       manifest,
       signal: controller.signal,
       onProgress: (progress) => setBuildState((current) => ({ ...current, status: 'uploading', progress })),
-    }).then(async (job) => {
+    })).then(async (job) => {
       const jobId = job.id || job.jobId;
       if (!jobId) throw new Error('The reconstruction service did not return a job id.');
       const status = String(job.status || '').toLowerCase();

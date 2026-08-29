@@ -8,6 +8,21 @@ export function getReconstructionEndpoint() {
   return endpoint;
 }
 
+export async function checkReconstructionService({ signal } = {}) {
+  if (!endpoint) throw new Error('No reconstruction endpoint is configured.');
+  let response;
+  try {
+    response = await fetch(`${endpoint}/health`, {
+      headers: { Accept: 'application/json', 'bypass-tunnel-reminder': 'true' },
+      signal,
+    });
+  } catch {
+    throw new Error('The reconstruction PC cannot be reached. Start the reconstruction server and its tunnel, then try again.');
+  }
+  if (!response.ok) throw new Error(`The reconstruction service is unavailable (status ${response.status}). Start the PC server and tunnel, then try again.`);
+  return response.json().catch(() => ({}));
+}
+
 function requestJson(url, options = {}) {
   return fetch(url, {
     ...options,

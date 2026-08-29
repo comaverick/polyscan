@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '..', '.env') });
 const { runColmapPipeline } = require('./colmap-worker.cjs');
 
 const port = Number(process.env.PORT || 8787);
