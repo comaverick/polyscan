@@ -604,7 +604,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   }) || (keyframeCount >= 8 && scanState.frameCount >= 20);
   const mappingReady = keyframeCount > 0;
   const captureMesh = buildCaptureMesh(scanState.stableFeatures);
-  const minimumViews = 8;
+  const minimumViews = 28;
+  const fullRoomReady = keyframeCount >= minimumViews && viable;
   const captureProgress = Math.min(100, Math.round((keyframeCount / minimumViews) * 100));
   const coach = getScanCoachAdvice({
     directionalCoverage: scanState.directionalCoverage,
@@ -680,14 +681,14 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
       <aside className="scan-capture-coach" aria-live="polite">
         <div className="scan-capture-coach-heading">
-          <span className={`scan-coach-state${viable ? ' is-ready' : ''}`}>{viable ? 'Ready to build' : 'Adaptive scan guide'}</span>
+          <span className={`scan-coach-state${fullRoomReady ? ' is-ready' : ''}`}>{fullRoomReady ? 'Full room target reached' : 'Adaptive scan guide'}</span>
           <strong>{keyframeCount} / {minimumViews} views</strong>
         </div>
         <div className="scan-progress-meter" aria-label={`${keyframeCount} of ${minimumViews} minimum room views captured`}>
           <span style={{ width: `${captureProgress}%` }} />
         </div>
         <strong className="scan-coach-title">{coach.title}</strong>
-        <p>{paused ? 'Resume when you are ready to continue the guided capture.' : coach.reason}</p>
+        <p>{paused ? 'Resume when you are ready to continue the guided capture.' : fullRoomReady ? 'Make one optional final pass over anything you skipped, then finish the scan.' : coach.reason}</p>
       </aside>
 
       <div className="scan-status-row" role="status" aria-live="polite">
@@ -714,11 +715,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
             type="button"
             className="scan-done-button"
             onClick={handleDone}
-            disabled={!viable || finishing}
-            aria-label={viable ? 'Done scanning' : 'Done scanning, waiting for basic map'}
+            disabled={!fullRoomReady || finishing}
+            aria-label={fullRoomReady ? 'Done scanning' : 'Done scanning, waiting for full room coverage'}
           >
             <span className="done-check" aria-hidden="true">✓</span>
-            <span>{finishing ? 'Saving' : viable ? 'Finish scan' : `Need ${Math.max(0, minimumViews - keyframeCount)} views`}</span>
+            <span>{finishing ? 'Saving' : fullRoomReady ? 'Finish scan' : `Need ${Math.max(0, minimumViews - keyframeCount)} views`}</span>
           </button>
         </div>
       </div>
