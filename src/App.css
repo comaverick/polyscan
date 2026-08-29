@@ -856,6 +856,16 @@ button { font: inherit; }
 .viewer-reset-position { position: absolute; right: 18px; bottom: max(32px, calc(env(safe-area-inset-bottom) + 8px)); z-index: 5; min-height: 38px; padding: 0 14px; border: 1px solid rgba(216, 243, 255, .24); border-radius: 999px; background: rgba(4, 12, 21, .64); color: rgba(237, 249, 255, .82); cursor: pointer; font-size: 10px; backdrop-filter: blur(16px); }
 .viewer-reset-position:active { transform: scale(.98); }
 
+/* The capture coach makes progress legible while the camera keeps the room in view. */
+.scan-capture-coach { position: absolute; top: max(123px, calc(env(safe-area-inset-top) + 109px)); left: 16px; z-index: 5; width: min(232px, calc(100vw - 32px)); padding: 12px; border: 1px solid rgba(203, 238, 255, .25); border-radius: 14px; background: rgba(4, 12, 21, .76); color: #effaff; box-shadow: 0 15px 36px rgba(0, 0, 0, .24); backdrop-filter: blur(16px); }
+.scan-capture-coach-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.scan-capture-coach-heading strong { font-size: 14px; font-weight: 650; letter-spacing: -.02em; }
+.scan-coach-state { color: rgba(201, 232, 248, .68); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.scan-coach-state.is-ready { color: #bdf6ff; }
+.scan-progress-meter { height: 5px; margin: 9px 0 8px; overflow: hidden; border-radius: 999px; background: rgba(163, 210, 237, .2); }
+.scan-progress-meter span { display: block; height: 100%; border-radius: inherit; background: #bdefff; box-shadow: 0 0 12px rgba(123, 220, 255, .65); transition: width .45s cubic-bezier(.16, 1, .3, 1); }
+.scan-capture-coach p { margin: 0; color: rgba(221, 240, 252, .76); font-size: 10px; line-height: 1.38; }
+
 @media (prefers-reduced-transparency: reduce) {
   .room-model-state,
   .viewer-look-hint,
@@ -864,6 +874,10 @@ button { font: inherit; }
 }
 
 @media (max-width: 700px) {
+  .scan-capture-coach { top: max(117px, calc(env(safe-area-inset-top) + 103px)); left: 13px; width: min(212px, calc(100vw - 26px)); padding: 10px; }
+  .scan-capture-coach-heading strong { font-size: 13px; }
+  .scan-capture-coach p { font-size: 9px; }
+  .scan-done-button { min-width: 118px; gap: 6px; font-size: 11px; }
   .viewer-touch-controls { bottom: max(18px, env(safe-area-inset-bottom)); left: 14px; width: 118px; height: 118px; }
   .viewer-reset-position { right: 14px; bottom: max(24px, calc(env(safe-area-inset-bottom) + 6px)); }
 }

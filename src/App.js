@@ -603,13 +603,21 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   }) || (keyframeCount >= 8 && scanState.frameCount >= 20);
   const mappingReady = keyframeCount > 0;
   const captureMesh = buildCaptureMesh(scanState.stableFeatures);
+  const minimumViews = 8;
+  const captureProgress = Math.min(100, Math.round((keyframeCount / minimumViews) * 100));
   const instruction = paused
     ? 'Paused'
     : trackingState === 'lost'
-      ? 'Return to a detailed area'
-      : mappingReady
-        ? 'Keep moving sideways for depth'
-        : 'Move slowly around the room';
+      ? 'Hold on a detailed corner, then move sideways'
+      : keyframeCount === 0
+        ? 'Start at a corner, then take three slow side steps'
+        : keyframeCount < 4
+          ? 'Walk sideways along this wall. Keep the corner in view'
+          : keyframeCount < minimumViews
+            ? 'Turn toward the next wall. Keep one edge from the last wall visible'
+            : viable
+              ? 'Room ready. Add more views or finish the scan'
+              : 'Sweep the floor and ceiling, then return to a corner';
   const cameraMessage = cameraState === 'unavailable'
     ? 'Camera preview unavailable'
     : cameraState === 'blocked'
@@ -675,10 +683,21 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         </div>
       )}
 
+      <aside className="scan-capture-coach" aria-live="polite">
+        <div className="scan-capture-coach-heading">
+          <span className={`scan-coach-state${viable ? ' is-ready' : ''}`}>{viable ? 'Ready to build' : 'Capturing room'}</span>
+          <strong>{keyframeCount} / {minimumViews} views</strong>
+        </div>
+        <div className="scan-progress-meter" aria-label={`${keyframeCount} of ${minimumViews} minimum room views captured`}>
+          <span style={{ width: `${captureProgress}%` }} />
+        </div>
+        <p>{keyframeCount === 0 ? 'Blue means this area still needs a view. The blue will clear where PolyScan saves a view.' : viable ? 'You have enough overlapping views for a first room build.' : 'Move slowly. A new view is saved when the counter increases.'}</p>
+      </aside>
+
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{mappingReady ? `${keyframeCount} full-size views${captureMesh.length ? ` / ${captureMesh.length} guide polygons` : ''}` : 'Blue = unscanned'}</span>
+        <span className="scan-frame-count">{mappingReady ? `${keyframeCount} saved views${captureMesh.length ? ` / ${captureMesh.length} cleared areas` : ''}` : 'Blue = unscanned'}</span>
       </div>
 
       <div className="scan-bottom-ui scan-reference-bottom">
@@ -703,7 +722,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
             aria-label={viable ? 'Done scanning' : 'Done scanning, waiting for basic map'}
           >
             <span className="done-check" aria-hidden="true">✓</span>
-            <span>{finishing ? 'Saving' : 'Done'}</span>
+            <span>{finishing ? 'Saving' : viable ? 'Finish scan' : `Need ${Math.max(0, minimumViews - keyframeCount)} views`}</span>
           </button>
         </div>
       </div>
