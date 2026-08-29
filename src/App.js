@@ -14,6 +14,7 @@ import {
   updateFeatureTracks,
 } from './scanner/featureTracking';
 import { buildCaptureMesh } from './scanner/captureMesh';
+import { getScanCoachAdvice } from './scanner/scanCoach';
 import {
   captureVideoKeyframe,
   countCapturedKeyframes,
@@ -605,19 +606,13 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const captureMesh = buildCaptureMesh(scanState.stableFeatures);
   const minimumViews = 8;
   const captureProgress = Math.min(100, Math.round((keyframeCount / minimumViews) * 100));
-  const instruction = paused
-    ? 'Paused'
-    : trackingState === 'lost'
-      ? 'Hold on a detailed corner, then move sideways'
-      : keyframeCount === 0
-        ? 'Start at a corner, then take three slow side steps'
-        : keyframeCount < 4
-          ? 'Walk sideways along this wall. Keep the corner in view'
-          : keyframeCount < minimumViews
-            ? 'Turn toward the next wall. Keep one edge from the last wall visible'
-            : viable
-              ? 'Room ready. Add more views or finish the scan'
-              : 'Sweep the floor and ceiling, then return to a corner';
+  const coach = getScanCoachAdvice({
+    directionalCoverage: scanState.directionalCoverage,
+    keyframes: keyframeCount,
+    evidence: scanState.lastEvidence,
+    trackingState,
+  });
+  const instruction = paused ? 'Paused' : coach.instruction;
   const cameraMessage = cameraState === 'unavailable'
     ? 'Camera preview unavailable'
     : cameraState === 'blocked'
@@ -685,13 +680,14 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
       <aside className="scan-capture-coach" aria-live="polite">
         <div className="scan-capture-coach-heading">
-          <span className={`scan-coach-state${viable ? ' is-ready' : ''}`}>{viable ? 'Ready to build' : 'Capturing room'}</span>
+          <span className={`scan-coach-state${viable ? ' is-ready' : ''}`}>{viable ? 'Ready to build' : 'Adaptive scan guide'}</span>
           <strong>{keyframeCount} / {minimumViews} views</strong>
         </div>
         <div className="scan-progress-meter" aria-label={`${keyframeCount} of ${minimumViews} minimum room views captured`}>
           <span style={{ width: `${captureProgress}%` }} />
         </div>
-        <p>{keyframeCount === 0 ? 'Blue means this area still needs a view. The blue will clear where PolyScan saves a view.' : viable ? 'You have enough overlapping views for a first room build.' : 'Move slowly. A new view is saved when the counter increases.'}</p>
+        <strong className="scan-coach-title">{coach.title}</strong>
+        <p>{paused ? 'Resume when you are ready to continue the guided capture.' : coach.reason}</p>
       </aside>
 
       <div className="scan-status-row" role="status" aria-live="polite">
