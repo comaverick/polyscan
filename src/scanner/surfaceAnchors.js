@@ -240,6 +240,14 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
   const createTile = (tileId, tileFeatures) => ({
     id: tileId,
     features: tileFeatures,
+    patch: (() => {
+      const padding = 0.045;
+      const minX = Math.max(0, Math.min(...tileFeatures.map((feature) => feature.x)) - padding);
+      const maxX = Math.min(1, Math.max(...tileFeatures.map((feature) => feature.x)) + padding);
+      const minY = Math.max(0, Math.min(...tileFeatures.map((feature) => feature.y)) - padding);
+      const maxY = Math.min(1, Math.max(...tileFeatures.map((feature) => feature.y)) + padding);
+      return [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }];
+    })(),
     stickers: tileFeatures.map((feature, index) => ({
       id: `${tileId}-coverage-${index}`,
       anchorId: tileId,
@@ -306,5 +314,22 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
   })).filter((sticker) => sticker.x > -0.12 && sticker.x < 1.12
     && sticker.y > -0.12 && sticker.y < 1.12);
 
-  return { stickers, localizations };
+  const patches = localizations.map(({ anchor, tile, transform }) => ({
+    id: tile.id,
+    anchorId: anchor.id,
+    vertices: (tile.patch || derivePatch(anchor.features)).map((point) => transformPoint(point, transform)),
+    confidence: transform.confidence,
+  })).filter((patch) => patch.vertices.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
+
+  return { stickers, patches, localizations };
+}
+
+function derivePatch(features = []) {
+  if (!features.length) return [];
+  const padding = 0.045;
+  const minX = Math.max(0, Math.min(...features.map((feature) => feature.x)) - padding);
+  const maxX = Math.min(1, Math.max(...features.map((feature) => feature.x)) + padding);
+  const minY = Math.max(0, Math.min(...features.map((feature) => feature.y)) - padding);
+  const maxY = Math.min(1, Math.max(...features.map((feature) => feature.y)) + padding);
+  return [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }];
 }
