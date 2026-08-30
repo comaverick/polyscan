@@ -241,6 +241,47 @@ function createCoverageStickers(tileId, tileFeatures = []) {
   }));
 }
 
+function interpolatePatch(patch, u, v) {
+  const top = {
+    x: patch[0].x + (patch[1].x - patch[0].x) * u,
+    y: patch[0].y + (patch[1].y - patch[0].y) * u,
+  };
+  const bottom = {
+    x: patch[3].x + (patch[2].x - patch[3].x) * u,
+    y: patch[3].y + (patch[2].y - patch[3].y) * u,
+  };
+  return {
+    x: top.x + (bottom.x - top.x) * v,
+    y: top.y + (bottom.y - top.y) * v,
+  };
+}
+
+function createCoverageCells(tileId, patch, columns = 6, rows = 6) {
+  if (!Array.isArray(patch) || patch.length < 4) return [];
+  const cells = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const left = column / columns;
+      const right = (column + 1) / columns;
+      const top = row / rows;
+      const bottom = (row + 1) / rows;
+      cells.push({
+        id: `${tileId}-cell-${row}-${column}`,
+        anchorId: tileId,
+        vertices: [
+          interpolatePatch(patch, left, top),
+          interpolatePatch(patch, right, top),
+          interpolatePatch(patch, right, bottom),
+          interpolatePatch(patch, left, bottom),
+        ],
+        confidence: 0.7,
+        kind: 'surface-coverage-cell',
+      });
+    }
+  }
+  return cells;
+}
+
 export function estimateSurfaceTransform(matches = [], options = {}) {
   const threshold = options.inlierThreshold ?? 0.048;
   const minimumInliers = options.minimumInliers ?? 4;
@@ -287,10 +328,8 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
       confidence: clamp(0.58 + Math.min(feature.score || 0, 180) / 600),
     }));
   if (anchorFeatures.length < 6) return null;
-  const createTile = (tileId, tileFeatures) => ({
-    id: tileId,
-    features: tileFeatures,
-    patch: (() => {
+  const createTile = (tileId, tileFeatures) => {
+    const patch = (() => {
       const padding = 0.035;
       const minFeatureX = Math.min(...tileFeatures.map((feature) => feature.x));
       const maxFeatureX = Math.max(...tileFeatures.map((feature) => feature.x));
@@ -305,17 +344,23 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
       const minY = Math.max(0, centerY - halfHeight);
       const maxY = Math.min(1, centerY + halfHeight);
       return [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }];
-    })(),
-    coverageStickers: createCoverageStickers(tileId, tileFeatures),
-    stickers: tileFeatures.map((feature, index) => ({
-      id: `${tileId}-coverage-${index}`,
-      anchorId: tileId,
-      x: feature.x,
-      y: feature.y,
-      radius: 0.04 + clamp((feature.score || 0) / 260) * 0.022,
-      confidence: feature.confidence,
-    })),
-  });
+    })();
+    return {
+      id: tileId,
+      features: tileFeatures,
+      patch,
+      coverageCells: createCoverageCells(tileId, patch),
+      coverageStickers: createCoverageStickers(tileId, tileFeatures),
+      stickers: tileFeatures.map((feature, index) => ({
+        id: `${tileId}-coverage-${index}`,
+        anchorId: tileId,
+        x: feature.x,
+        y: feature.y,
+        radius: 0.04 + clamp((feature.score || 0) / 260) * 0.022,
+        confidence: feature.confidence,
+      })),
+    };
+  };
   const tileBuckets = new Map();
   anchorFeatures.forEach((feature) => {
     const tileX = Math.min(1, Math.floor(feature.x * 2));
@@ -324,7 +369,7 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
     tileBuckets.set(tileId, [...(tileBuckets.get(tileId) || []), feature]);
   });
   let tiles = [...tileBuckets.entries()]
-    .filter(([, tileFeatures]) => tileFeatures.length >= 4)
+    .filter(([, tileFeatures]) => tileFeatures.length >= 5)
     .map(([tileId, tileFeatures]) => createTile(tileId, tileFeatures));
   if (!tiles.length) tiles = [createTile(`${id}-tile-all`, anchorFeatures)];
   return {
@@ -339,6 +384,7 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
       vertices: tile.patch,
       confidence: 0.7,
     })),
+    coverageCells: tiles.flatMap((tile) => tile.coverageCells || []),
     stickers: tiles.flatMap((tile) => tile.stickers),
     coverageStickers: tiles.flatMap((tile) => tile.coverageStickers || []),
   };
@@ -396,6 +442,13 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
   })).filter((sticker) => sticker.x > -0.12 && sticker.x < 1.12
     && sticker.y > -0.12 && sticker.y < 1.12);
 
+  const coverageCells = localizations.flatMap(({ tile, transform }) => (tile.coverageCells || []).map((cell) => ({
+    ...cell,
+    anchorId: tile.id,
+    vertices: cell.vertices.map((point) => transformPoint(point, transform)),
+    confidence: clamp(cell.confidence * (0.58 + transform.confidence * 0.42)),
+  }))).filter((cell) => cell.vertices.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
+
   const patches = localizations.map(({ anchor, tile, transform }) => ({
     id: tile.id,
     anchorId: anchor.id,
@@ -403,7 +456,7 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
     confidence: transform.confidence,
   })).filter((patch) => patch.vertices.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
 
-  return { stickers, coverageStickers, patches, localizations };
+  return { stickers, coverageStickers, coverageCells, patches, localizations };
 }
 
 function derivePatch(features = []) {

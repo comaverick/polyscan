@@ -75,6 +75,7 @@ test('creates scan stickers without requiring polygon geometry', () => {
   expect(anchor.stickers).toHaveLength(6);
   expect(anchor.stickers.every((sticker) => sticker.anchorId.startsWith('chair-tile-'))).toBe(true);
   expect(anchor.patches.length).toBeGreaterThan(0);
+  expect(anchor.coverageCells.length).toBeGreaterThan(0);
   expect(anchor.coverageStickers.length).toBeGreaterThan(0);
   expect(anchor.coverageStickers.every((sticker) => sticker.trackable === false)).toBe(true);
 });
@@ -100,6 +101,19 @@ test('reprojects saved stickers when the same surface returns to view', () => {
   expect(result.stickers[0].x).toBeCloseTo(moved[0].x, 3);
   expect(result.stickers[0].y).toBeCloseTo(moved[0].y, 3);
   expect(result.patches).toHaveLength(1);
+});
+
+test('reprojects persistent surface coverage cells with the wall', () => {
+  const features = [...source, feature('f', 0.66, 0.31, [0.5, 0.2, 0.1, 0.7, 0.3])]
+    .map((item, index) => ({ ...item, score: 80 + index * 3 }));
+  const anchor = createSurfaceAnchor({ id: 'wall-grid', features, timestamp: 1 });
+  const result = localizeSurfaceAnchors([anchor], moved);
+
+  expect(result.coverageCells.length).toBeGreaterThan(0);
+  expect(result.coverageCells.every((cell) => cell.vertices.length === 4)).toBe(true);
+  expect(result.coverageCells.every((cell) => cell.vertices.every((point) => (
+    Number.isFinite(point.x) && Number.isFinite(point.y)
+  )))).toBe(true);
 });
 
 test('does not leave a mesh floating when the surface cannot be recognized', () => {

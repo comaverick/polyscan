@@ -48,7 +48,8 @@ const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
 const SURFACE_LOCK_OPTIONS = Object.freeze({
-  minimumTransformConfidence: 0.44,
+  minimumTransformConfidence: 0.5,
+  minimumInliers: 5,
   inlierThreshold: 0.04,
 });
 
@@ -788,19 +789,26 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         : null;
       const surfaceAnchors = appendSurfaceAnchor(current.surfaceAnchors || [], newSurfaceAnchor, 48);
       const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features, SURFACE_LOCK_OPTIONS);
+      const currentSurfaceCoverage = surfaceMap.coverageCells?.length
+        ? surfaceMap.coverageCells
+        : surfaceMap.patches;
+      const newSurfaceCoverage = newSurfaceAnchor?.coverageCells?.length
+        ? newSurfaceAnchor.coverageCells
+        : (newSurfaceAnchor?.patches || []);
       const visibleSurfaceStickers = newSurfaceAnchor
         && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
         ? [
           ...surfaceMap.stickers,
-          ...(surfaceMap.coverageStickers || []),
           ...newSurfaceAnchor.stickers,
-          ...(newSurfaceAnchor.coverageStickers || []),
         ]
-        : [...surfaceMap.stickers, ...(surfaceMap.coverageStickers || [])];
+        : surfaceMap.stickers;
       const visibleSurfacePatches = newSurfaceAnchor
         && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
-        ? [...surfaceMap.patches, ...(newSurfaceAnchor.patches || [])]
-        : surfaceMap.patches;
+        ? [
+          ...currentSurfaceCoverage,
+          ...newSurfaceCoverage,
+        ]
+        : currentSurfaceCoverage;
       const visibleSurfaceAnchorCount = surfaceMap.localizations.length
         + (newSurfaceAnchor && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id) ? 1 : 0);
 
