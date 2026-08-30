@@ -49,6 +49,22 @@ test('accepts a perspective-like affine surface change and rejects an outlier', 
   expect(transform.c).toBeCloseTo(-0.08, 2);
 });
 
+test('uses a projective transform when a wall changes perspective', () => {
+  const target = source.map((point) => {
+    const denominator = 1 + point.x * 0.18 - point.y * 0.08;
+    return {
+      ...point,
+      x: (1.04 * point.x + 0.09 * point.y + 0.035) / denominator,
+      y: (-0.04 * point.x + 0.98 * point.y + 0.025) / denominator,
+    };
+  });
+  const transform = estimateSurfaceTransform(source.map((point, index) => ({ source: point, target: target[index] })));
+
+  expect(transform).not.toBeNull();
+  expect(transform.g).toBeCloseTo(0.18, 2);
+  expect(transform.h).toBeCloseTo(-0.08, 2);
+});
+
 test('creates scan stickers without requiring polygon geometry', () => {
   const features = [...source, feature('f', 0.66, 0.31, [0.5, 0.2, 0.1, 0.7, 0.3])]
     .map((item, index) => ({ ...item, score: 80 + index * 3 }));

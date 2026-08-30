@@ -119,6 +119,22 @@ export function isReconstructionViable({
     && meaningfulCameraMotion;
 }
 
+export function hasCompleteRoomCoverage(cells = [], options = {}) {
+  const wallThreshold = options.wallThreshold ?? 0.16;
+  const shellThreshold = options.shellThreshold ?? 0.11;
+  const average = (items) => items.length
+    ? items.reduce((sum, item) => sum + (item.coverage || 0), 0) / items.length
+    : 0;
+  const walls = [0, 1, 2, 3].map((wallIndex) => average(
+    cells.filter((cell) => Math.floor(cell.yawIndex / 5) === wallIndex),
+  ));
+  const upper = average(cells.filter((cell) => cell.pitchBand === 0));
+  const lower = average(cells.filter((cell) => cell.pitchBand === 2));
+  return walls.every((coverage) => coverage >= wallThreshold)
+    && upper >= shellThreshold
+    && lower >= shellThreshold;
+}
+
 function distance3d(first, second) {
   return Math.hypot(
     (first.x || 0) - (second.x || 0),

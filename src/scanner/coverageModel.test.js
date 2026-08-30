@@ -3,6 +3,7 @@ import {
   classifyCoverage,
   createDirectionalCoverage,
   createSurfacePatch,
+  hasCompleteRoomCoverage,
   isDistinctViewpoint,
   isReconstructionViable,
   selectBestKeyframes,
@@ -92,6 +93,19 @@ test('Done viability is evidence based and does not require complete room covera
     featureTracks: 24,
     meaningfulCameraMotion: true,
   })).toBe(true);
+});
+
+test('room completion requires four walls plus upper and lower shell evidence', () => {
+  const shell = createDirectionalCoverage().map((cell) => ({ ...cell, coverage: 0.2 }));
+  expect(hasCompleteRoomCoverage(shell)).toBe(true);
+  const missingWall = shell.map((cell) => (
+    Math.floor(cell.yawIndex / 5) === 2 ? { ...cell, coverage: 0 } : cell
+  ));
+  expect(hasCompleteRoomCoverage(missingWall)).toBe(false);
+  const missingCeiling = shell.map((cell) => (
+    cell.pitchBand === 0 ? { ...cell, coverage: 0 } : cell
+  ));
+  expect(hasCompleteRoomCoverage(missingCeiling)).toBe(false);
 });
 
 test('triangulation requires multi-view baseline and rejects degenerate rays', () => {

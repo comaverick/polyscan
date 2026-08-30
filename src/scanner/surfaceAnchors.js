@@ -46,11 +46,34 @@ function matchAnchorFeatures(anchorFeatures = [], currentFeatures = [], options 
 }
 
 function transformPoint(point, transform) {
+  const denominator = (transform.g || 0) * point.x + (transform.h || 0) * point.y + 1;
+  if (Math.abs(denominator) < 0.000001) return { ...point, x: Infinity, y: Infinity };
   return {
     ...point,
-    x: transform.a * point.x + transform.b * point.y + transform.tx,
-    y: transform.c * point.x + transform.d * point.y + transform.ty,
+    x: (transform.a * point.x + transform.b * point.y + transform.tx) / denominator,
+    y: (transform.c * point.x + transform.d * point.y + transform.ty) / denominator,
   };
+}
+
+function solveLinearSystem(matrix, vector) {
+  const size = vector.length;
+  const values = matrix.map((row, index) => [...row, vector[index]]);
+  for (let column = 0; column < size; column += 1) {
+    let pivot = column;
+    for (let row = column + 1; row < size; row += 1) {
+      if (Math.abs(values[row][column]) > Math.abs(values[pivot][column])) pivot = row;
+    }
+    if (Math.abs(values[pivot][column]) < 0.0000001) return null;
+    [values[column], values[pivot]] = [values[pivot], values[column]];
+    const divisor = values[column][column];
+    for (let index = column; index <= size; index += 1) values[column][index] /= divisor;
+    for (let row = 0; row < size; row += 1) {
+      if (row === column) continue;
+      const multiplier = values[row][column];
+      for (let index = column; index <= size; index += 1) values[row][index] -= multiplier * values[column][index];
+    }
+  }
+  return values.map((row) => row[size]);
 }
 
 function solve3x3(matrix, vector) {
@@ -127,6 +150,40 @@ function refineTransform(matches) {
   return isSaneTransform(transform) ? transform : null;
 }
 
+function refinePerspectiveTransform(matches) {
+  if (matches.length < 4) return null;
+  const matrix = [];
+  const vector = [];
+  matches.forEach(({ source, target }) => {
+    matrix.push([source.x, source.y, 1, 0, 0, 0, -target.x * source.x, -target.x * source.y]);
+    vector.push(target.x);
+    matrix.push([0, 0, 0, source.x, source.y, 1, -target.y * source.x, -target.y * source.y]);
+    vector.push(target.y);
+  });
+  const normal = Array.from({ length: 8 }, () => Array(8).fill(0));
+  const right = Array(8).fill(0);
+  matrix.forEach((row, rowIndex) => {
+    for (let first = 0; first < 8; first += 1) {
+      right[first] += row[first] * vector[rowIndex];
+      for (let second = 0; second < 8; second += 1) normal[first][second] += row[first] * row[second];
+    }
+  });
+  const values = solveLinearSystem(normal, right);
+  if (!values) return null;
+  const transform = {
+    a: values[0], b: values[1], tx: values[2],
+    c: values[3], d: values[4], ty: values[5],
+    g: values[6], h: values[7],
+  };
+  if (!isSaneTransform(transform)) return null;
+  const corners = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }];
+  return corners.every((corner) => {
+    const projected = transformPoint(corner, transform);
+    return Number.isFinite(projected.x) && Number.isFinite(projected.y)
+      && projected.x > -1.5 && projected.x < 2.5 && projected.y > -1.5 && projected.y < 2.5;
+  }) ? transform : null;
+}
+
 function inliersForTransform(matches, transform, threshold) {
   return matches.filter((match) => {
     const projected = transformPoint(match.source, transform);
@@ -152,7 +209,9 @@ export function estimateSurfaceTransform(matches = [], options = {}) {
     }
   }
   if (!best || best.inliers.length < minimumInliers) return null;
-  const refined = refineTransform(best.inliers) || best.transform;
+  // A wall changes shape under perspective. Prefer a projective transform once
+  // enough inliers exist, while retaining affine tracking as a safe fallback.
+  const refined = refinePerspectiveTransform(best.inliers) || refineTransform(best.inliers) || best.transform;
   const inliers = inliersForTransform(matches, refined, threshold);
   if (inliers.length < minimumInliers) return null;
   const averageError = inliers.reduce((sum, match) => {

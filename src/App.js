@@ -4,6 +4,7 @@ import {
   DEFAULT_VIEWPOINT_THRESHOLDS,
   createDirectionalCoverage,
   getVisibleCellIds,
+  hasCompleteRoomCoverage,
   isReconstructionViable,
   selectBestKeyframes,
   updateDirectionalCoverage,
@@ -700,16 +701,16 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         parallax: evidence.parallax,
       });
       const isFirstKeyframe = current.cameraKeyframes.length === 0;
-      const lastKeyframe = current.cameraKeyframes[current.cameraKeyframes.length - 1];
-      const timedDetailedView = currentFrame.features.length >= 8
-        && currentFrame.timestamp - (lastKeyframe?.timestamp || 0) >= 1400;
       let thumbnail = null;
       try {
         thumbnail = canvas.toDataURL('image/jpeg', 0.72);
       } catch {
         // Canvas export can be unavailable in restricted browsers.
       }
-      const shouldCaptureKeyframe = ((evidence.tracking && (isFirstKeyframe || evidence.usefulViewpoint)) || timedDetailedView)
+      // Do not inflate the scan count on a timer. A saved view must either be
+      // the first lock or contain demonstrably new camera evidence.
+      const shouldCaptureKeyframe = evidence.tracking
+        && (isFirstKeyframe || evidence.usefulViewpoint)
         && current.cameraKeyframes.length < 96;
       const keyframeId = `keyframe-${current.cameraKeyframes.length + 1}`;
       const nextKeyframes = shouldCaptureKeyframe
@@ -782,12 +783,14 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const mappingReady = keyframeCount > 0;
   const surfaceStickers = scanState.visibleSurfaceStickers || [];
   const minimumViews = 28;
-  const fullRoomReady = keyframeCount >= minimumViews && viable;
+  const roomShellCovered = hasCompleteRoomCoverage(scanState.directionalCoverage);
+  const fullRoomReady = keyframeCount >= minimumViews && viable && roomShellCovered;
   const captureProgress = Math.min(100, Math.round((keyframeCount / minimumViews) * 100));
   const coach = getScanCoachAdvice({
     directionalCoverage: scanState.directionalCoverage,
     keyframes: keyframeCount,
     evidence: scanState.lastEvidence,
+    roomShellCovered,
     trackingState,
   });
   const visibleDetailCount = scanState.lastFrame?.features?.length || 0;
@@ -865,7 +868,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
       <aside className="scan-capture-coach" aria-live="polite">
         <div className="scan-capture-coach-heading">
-          <span className={`scan-coach-state${fullRoomReady ? ' is-ready' : ''}`}>{fullRoomReady ? 'Full room target reached' : 'Adaptive scan guide'}</span>
+          <span className={`scan-coach-state${fullRoomReady ? ' is-ready' : ''}`}>{fullRoomReady ? 'Full room target reached' : roomShellCovered ? 'Room shell covered' : 'Adaptive scan guide'}</span>
           <strong>{keyframeCount} / {minimumViews} views</strong>
         </div>
         <div className="scan-progress-meter" aria-label={`${keyframeCount} of ${minimumViews} minimum room views captured`}>
@@ -907,7 +910,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
             aria-label={fullRoomReady ? 'Done scanning' : 'Done scanning, waiting for full room coverage'}
           >
             <span className="done-check" aria-hidden="true">✓</span>
-            <span>{finishing ? 'Saving' : fullRoomReady ? 'Finish scan' : `Need ${Math.max(0, minimumViews - keyframeCount)} views`}</span>
+            <span>{finishing ? 'Saving' : fullRoomReady ? 'Finish scan' : keyframeCount < minimumViews ? `Need ${Math.max(0, minimumViews - keyframeCount)} views` : 'Cover room shell'}</span>
           </button>
         </div>
       </div>
