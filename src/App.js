@@ -18,6 +18,10 @@ import {
   createSurfaceAnchor,
   localizeSurfaceAnchors,
 } from './scanner/surfaceAnchors';
+import {
+  grayscaleFromImageData,
+  trackSurfaceStickerGroups,
+} from './scanner/surfaceFlow';
 import { getScanCoachAdvice } from './scanner/scanCoach';
 import {
   captureVideoKeyframe,
@@ -84,7 +88,7 @@ const createEmptyScanState = () => ({
   meaningfulCameraMotion: false,
   stableFeatures: [],
   surfaceAnchors: [],
-  visibleSurfacePatches: [],
+  visibleSurfaceStickers: [],
   visibleSurfaceAnchorCount: 0,
   lastFrame: null,
   lastViewpoint: null,
@@ -121,16 +125,47 @@ function CameraPlaceholder() {
   );
 }
 
-function CaptureMeshCanvas({ patches, mappingReady, parallax = 0, videoRef }) {
+function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
   const canvasRef = useRef(null);
+  const activeStickersRef = useRef([]);
+  const lastExternalLockRef = useRef(0);
+
+  useEffect(() => {
+    if (!stickers.length) return;
+    const activeById = new Map(activeStickersRef.current.map((sticker) => [sticker.id, sticker]));
+    activeStickersRef.current = stickers.map((sticker) => {
+      const active = activeById.get(sticker.id);
+      if (!active || Math.hypot(active.x - sticker.x, active.y - sticker.y) > 0.13) return sticker;
+      return {
+        ...sticker,
+        x: active.x * 0.62 + sticker.x * 0.38,
+        y: active.y * 0.62 + sticker.y * 0.38,
+        confidence: Math.max(active.confidence || 0, sticker.confidence || 0),
+      };
+    });
+    lastExternalLockRef.current = performance.now();
+  }, [stickers]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     const context = canvas.getContext('2d');
     if (!context) return undefined;
+    const trackedVideo = videoRef?.current;
+    const trackingCanvas = document.createElement('canvas');
+    const trackingWidth = 192;
+    const trackingHeight = 144;
+    trackingCanvas.width = trackingWidth;
+    trackingCanvas.height = trackingHeight;
+    const trackingContext = trackingCanvas.getContext('2d', { willReadFrequently: true });
+    let previousGray = null;
+    let lastProcessedAt = 0;
+    let lastGoodFlowAt = performance.now();
+    let animationHandle = null;
+    let videoFrameHandle = null;
+    let cancelled = false;
 
-    const draw = () => {
+    const draw = (visibleStickers = activeStickersRef.current) => {
       const rect = canvas.getBoundingClientRect();
       const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
       const width = Math.max(1, rect.width);
@@ -146,11 +181,9 @@ function CaptureMeshCanvas({ patches, mappingReady, parallax = 0, videoRef }) {
 
       context.fillStyle = mappingReady ? 'rgba(24, 81, 210, .5)' : 'rgba(24, 81, 210, .62)';
       context.fillRect(0, 0, width, height);
-      if (!patches.length) return;
+      if (!visibleStickers.length) return;
 
-      // The camera uses object-fit: cover. Apply the same crop here so a
-      // normalized camera point lands on the same physical detail on screen.
-      const video = videoRef?.current;
+      const video = trackedVideo;
       const sourceWidth = video?.videoWidth || width;
       const sourceHeight = video?.videoHeight || height;
       const coverScale = Math.max(width / sourceWidth, height / sourceHeight);
@@ -163,89 +196,117 @@ function CaptureMeshCanvas({ patches, mappingReady, parallax = 0, videoRef }) {
         y: cropY + point.y * drawnHeight,
       });
 
-      const traceTriangle = (vertices, offset = { x: 0, y: 0 }) => {
-        context.beginPath();
-        vertices.forEach((vertex, index) => {
-          const projected = projectPoint(vertex);
-          const x = projected.x + offset.x;
-          const y = projected.y + offset.y;
-          if (index === 0) context.moveTo(x, y);
-          else context.lineTo(x, y);
-        });
-        context.closePath();
-      };
-
       context.save();
       context.globalCompositeOperation = 'destination-out';
-      patches.forEach((patch) => {
-        traceTriangle(patch.vertices);
-        context.fillStyle = `rgba(0, 0, 0, ${0.72 + patch.confidence * 0.25})`;
-        context.shadowColor = 'rgba(0, 0, 0, .72)';
-        context.shadowBlur = 7;
+      visibleStickers.forEach((sticker) => {
+        const point = projectPoint(sticker);
+        const radius = Math.max(10, sticker.radius * Math.min(drawnWidth, drawnHeight));
+        const gradient = context.createRadialGradient(point.x, point.y, radius * 0.16, point.x, point.y, radius);
+        gradient.addColorStop(0, `rgba(0, 0, 0, ${0.9 + (sticker.confidence || 0) * 0.1})`);
+        gradient.addColorStop(0.68, `rgba(0, 0, 0, ${0.68 + (sticker.confidence || 0) * 0.22})`);
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        context.beginPath();
+        context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+        context.fillStyle = gradient;
         context.fill();
       });
       context.restore();
 
-      const parallaxDepth = Math.max(1.5, Math.min(7, parallax * width * 0.55));
       context.lineJoin = 'round';
       context.lineCap = 'round';
-      patches.forEach((patch) => {
-        const projectedCentroid = projectPoint(patch.centroid);
-        const radialX = projectedCentroid.x / width - 0.5;
-        const radialY = projectedCentroid.y / height - 0.5;
-        const depthOffset = {
-          x: radialX * parallaxDepth * (0.8 + patch.centroid.depth),
-          y: radialY * parallaxDepth * 0.55 * (0.8 + patch.centroid.depth),
-        };
-        const depthAlpha = 0.08 + patch.centroid.depth * 0.12;
-
-        traceTriangle(patch.vertices, depthOffset);
-        context.fillStyle = `rgba(47, 143, 222, ${depthAlpha})`;
-        context.fill();
-        context.strokeStyle = `rgba(119, 220, 255, ${0.16 + patch.confidence * 0.24})`;
-        context.lineWidth = 0.65;
+      visibleStickers.forEach((sticker) => {
+        const point = projectPoint(sticker);
+        const radius = Math.max(8, sticker.radius * Math.min(drawnWidth, drawnHeight));
+        const confidence = sticker.confidence || 0.5;
+        context.beginPath();
+        context.arc(point.x, point.y, radius * 0.48, -0.8, 2.6);
+        context.strokeStyle = `rgba(205, 244, 255, ${0.18 + confidence * 0.42})`;
+        context.lineWidth = 0.8;
         context.stroke();
-
-        patch.vertices.forEach((vertex) => {
-          const projected = projectPoint(vertex);
+        for (let index = 0; index < 3; index += 1) {
+          const angle = ((sticker.seed || 0) * 0.37 + index * 2.1) % (Math.PI * 2);
+          const distance = radius * (0.3 + index * 0.12);
           context.beginPath();
-          context.moveTo(projected.x, projected.y);
-          context.lineTo(projected.x + depthOffset.x, projected.y + depthOffset.y);
-          context.strokeStyle = `rgba(102, 205, 251, ${0.1 + vertex.depth * 0.16})`;
-          context.lineWidth = 0.55;
-          context.stroke();
-        });
-
-        traceTriangle(patch.vertices);
-        context.fillStyle = `rgba(114, 210, 248, ${0.025 + patch.confidence * 0.045})`;
-        context.fill();
-        context.strokeStyle = `rgba(226, 250, 255, ${0.26 + patch.confidence * 0.46})`;
-        context.lineWidth = 0.72;
-        context.stroke();
-
-        patch.vertices.forEach((vertex) => {
-          const projected = projectPoint(vertex);
-          context.beginPath();
-          context.moveTo(projectedCentroid.x, projectedCentroid.y);
-          context.lineTo(projected.x, projected.y);
-          context.strokeStyle = `rgba(194, 239, 255, ${0.07 + vertex.depth * 0.11})`;
-          context.lineWidth = 0.45;
-          context.stroke();
-        });
+          context.arc(
+            point.x + Math.cos(angle) * distance,
+            point.y + Math.sin(angle) * distance,
+            0.8 + index * 0.18,
+            0,
+            Math.PI * 2,
+          );
+          context.fillStyle = `rgba(167, 230, 255, ${0.18 + confidence * 0.38})`;
+          context.fill();
+        }
       });
     };
 
-    draw();
-    const resizeObserver = window.ResizeObserver ? new ResizeObserver(draw) : null;
-    resizeObserver?.observe(canvas);
-    window.addEventListener('resize', draw);
-    return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', draw);
+    const processFrame = (timestamp) => {
+      if (cancelled) return;
+      const video = trackedVideo;
+      if (trackingContext && video?.readyState >= 2 && timestamp - lastProcessedAt >= 66) {
+        lastProcessedAt = timestamp;
+        try {
+          trackingContext.drawImage(video, 0, 0, trackingWidth, trackingHeight);
+          const currentGray = grayscaleFromImageData(
+            trackingContext.getImageData(0, 0, trackingWidth, trackingHeight),
+          );
+          let acceptCurrentReference = true;
+          if (previousGray && activeStickersRef.current.length) {
+            const flow = trackSurfaceStickerGroups(
+              previousGray,
+              currentGray,
+              trackingWidth,
+              trackingHeight,
+              activeStickersRef.current,
+            );
+            if (flow.trackedCount >= 3 && flow.confidence >= 0.66) {
+              activeStickersRef.current = flow.stickers;
+              lastGoodFlowAt = timestamp;
+            } else if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
+              activeStickersRef.current = [];
+            } else {
+              // Keep the last sharp reference through a brief blur or autofocus
+              // pulse so the next good frame can recover the same surface.
+              acceptCurrentReference = false;
+            }
+          }
+          if (acceptCurrentReference) previousGray = currentGray;
+        } catch {
+          previousGray = null;
+        }
+      }
+      draw();
+      if (video?.requestVideoFrameCallback) {
+        videoFrameHandle = video.requestVideoFrameCallback(processFrame);
+      } else {
+        animationHandle = window.requestAnimationFrame(processFrame);
+      }
     };
-  }, [mappingReady, parallax, patches, videoRef]);
 
-  return <canvas ref={canvasRef} className="capture-mesh-canvas" data-mesh-patches={patches.length} aria-hidden="true" />;
+    draw();
+    const handleResize = () => draw();
+    const resizeObserver = window.ResizeObserver ? new ResizeObserver(handleResize) : null;
+    resizeObserver?.observe(canvas);
+    window.addEventListener('resize', handleResize);
+    processFrame(performance.now());
+    return () => {
+      cancelled = true;
+      if (animationHandle != null) window.cancelAnimationFrame(animationHandle);
+      if (videoFrameHandle != null && trackedVideo?.cancelVideoFrameCallback) trackedVideo.cancelVideoFrameCallback(videoFrameHandle);
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [mappingReady, videoRef]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="capture-mesh-canvas surface-sticker-canvas"
+      data-mesh-patches={stickers.length}
+      data-surface-stickers={stickers.length}
+      aria-hidden="true"
+    />
+  );
 }
 
 function Icon({ name, size = 18 }) {
@@ -599,7 +660,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           capturePromise: captureVideoKeyframe(video),
         }]
         : current.cameraKeyframes;
-      const newSurfaceAnchor = shouldCaptureKeyframe
+      const existingSurfaceMap = localizeSurfaceAnchors(current.surfaceAnchors || [], currentFrame.features);
+      const strongestExistingLock = existingSurfaceMap.localizations[0]?.transform;
+      const shouldCreateSurfaceAnchor = shouldCaptureKeyframe
+        && (!strongestExistingLock || strongestExistingLock.inlierCount < 10);
+      const newSurfaceAnchor = shouldCreateSurfaceAnchor
         ? createSurfaceAnchor({
           id: keyframeId,
           features: currentFrame.features,
@@ -609,6 +674,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         : null;
       const surfaceAnchors = appendSurfaceAnchor(current.surfaceAnchors || [], newSurfaceAnchor);
       const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features);
+      const visibleSurfaceStickers = newSurfaceAnchor
+        && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
+        ? [...surfaceMap.stickers, ...newSurfaceAnchor.stickers]
+        : surfaceMap.stickers;
+      const visibleSurfaceAnchorCount = surfaceMap.localizations.length
+        + (newSurfaceAnchor && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id) ? 1 : 0);
 
       const nextState = {
         ...current,
@@ -620,8 +691,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         meaningfulCameraMotion: current.meaningfulCameraMotion || evidence.usefulViewpoint,
         stableFeatures: evidence.stableFeatures,
         surfaceAnchors,
-        visibleSurfacePatches: surfaceMap.patches,
-        visibleSurfaceAnchorCount: surfaceMap.localizations.length,
+        visibleSurfaceStickers,
+        visibleSurfaceAnchorCount,
         lastFrame: { ...currentFrame, viewpoint: evidence.viewpoint },
         lastViewpoint: evidence.viewpoint,
         lastEvidence: evidence,
@@ -644,7 +715,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     meaningfulCameraMotion: scanState.meaningfulCameraMotion,
   }) || (keyframeCount >= 8 && scanState.frameCount >= 20);
   const mappingReady = keyframeCount > 0;
-  const captureMesh = scanState.visibleSurfacePatches || [];
+  const surfaceStickers = scanState.visibleSurfaceStickers || [];
   const minimumViews = 28;
   const fullRoomReady = keyframeCount >= minimumViews && viable;
   const captureProgress = Math.min(100, Math.round((keyframeCount / minimumViews) * 100));
@@ -654,7 +725,14 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     evidence: scanState.lastEvidence,
     trackingState,
   });
-  const instruction = paused ? 'Paused' : coach.instruction;
+  const visibleDetailCount = scanState.lastFrame?.features?.length || 0;
+  const instruction = paused
+    ? 'Paused'
+    : visibleDetailCount > 0 && visibleDetailCount < 10
+      ? 'Aim at an edge, corner, pattern, or piece of furniture'
+      : trackingState === 'lost'
+        ? 'Slow down and hold a detailed surface in view'
+        : coach.instruction;
   const cameraMessage = cameraState === 'unavailable'
     ? 'Camera preview unavailable'
     : cameraState === 'blocked'
@@ -687,7 +765,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <section className="scan-preview-frame" aria-label="Room camera preview">
         <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
         <CameraPlaceholder />
-        <CaptureMeshCanvas patches={captureMesh} mappingReady={mappingReady} parallax={scanState.lastEvidence?.parallax || 0} videoRef={videoRef} />
+        <SurfaceStickerCanvas stickers={surfaceStickers} mappingReady={mappingReady} videoRef={videoRef} />
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
         <div className="camera-corners" aria-hidden="true">
           <span className="corner corner-top-left" />
@@ -716,7 +794,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       {modeOpen && (
         <div className="scan-tip-card" role="status">
           <strong>Scan the room slowly</strong>
-          <span>Keep edges and corners in view while you move sideways.</span>
+          <span>The small scan marks should remain attached to edges and details as you move.</span>
         </div>
       )}
 
@@ -737,7 +815,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         <span>{statusLabel}</span>
         <span className="scan-frame-count">{mappingReady
           ? scanState.visibleSurfaceAnchorCount > 0
-            ? `Surface locked / ${captureMesh.length} marked areas`
+            ? `Surface locked / ${surfaceStickers.length} scan marks`
             : `${keyframeCount} views saved / point back to restore marks`
           : 'Blue = unscanned'}</span>
       </div>

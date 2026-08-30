@@ -8,6 +8,11 @@ function luminance(red, green, blue) {
   return red * 0.2126 + green * 0.7152 + blue * 0.0722;
 }
 
+function luminanceAt(data, width, x, y) {
+  const index = (y * width + x) * 4;
+  return luminance(data[index], data[index + 1], data[index + 2]);
+}
+
 function descriptorAt(data, width, height, x, y) {
   const descriptor = [];
   // A wider normalized patch survives small camera movements and exposure
@@ -27,15 +32,15 @@ function descriptorAt(data, width, height, x, y) {
 }
 
 function featureScore(data, width, height, x, y) {
-  const center = luminance(...data.slice((y * width + x) * 4, (y * width + x) * 4 + 3));
   const rightX = Math.min(width - 1, x + 3);
   const leftX = Math.max(0, x - 3);
   const downY = Math.min(height - 1, y + 3);
   const upY = Math.max(0, y - 3);
-  const right = luminance(...data.slice((y * width + rightX) * 4, (y * width + rightX) * 4 + 3));
-  const left = luminance(...data.slice((y * width + leftX) * 4, (y * width + leftX) * 4 + 3));
-  const down = luminance(...data.slice((downY * width + x) * 4, (downY * width + x) * 4 + 3));
-  const up = luminance(...data.slice((upY * width + x) * 4, (upY * width + x) * 4 + 3));
+  const center = luminanceAt(data, width, x, y);
+  const right = luminanceAt(data, width, rightX, y);
+  const left = luminanceAt(data, width, leftX, y);
+  const down = luminanceAt(data, width, x, downY);
+  const up = luminanceAt(data, width, x, upY);
   return Math.abs(right - left) + Math.abs(down - up) + Math.abs(center - (right + left + down + up) / 4);
 }
 
@@ -44,22 +49,28 @@ function colorAt(data, width, x, y) {
   return { r: data[index], g: data[index + 1], b: data[index + 2] };
 }
 
-export function extractFrameFeatures(context, width, height, maximum = 64) {
+export function extractFrameFeatures(context, width, height, maximum = 80) {
   const image = context.getImageData(0, 0, width, height);
   const candidates = [];
   const data = image.data;
-  for (let y = 12; y < height - 12; y += 12) {
-    for (let x = 12; x < width - 12; x += 12) {
+  for (let y = 12; y < height - 12; y += 4) {
+    for (let x = 12; x < width - 12; x += 4) {
       const score = featureScore(data, width, height, x, y);
-      if (score >= 14) candidates.push({ x, y, score });
+      if (score >= 16) candidates.push({ x, y, score });
     }
   }
   candidates.sort((first, second) => second.score - first.score);
   const selected = [];
-  candidates.forEach((candidate) => {
-    if (selected.length >= maximum) return;
-    const tooClose = selected.some((feature) => Math.hypot(feature.x - candidate.x, feature.y - candidate.y) < 18);
-    if (tooClose) return;
+  const regionCounts = new Map();
+  const maximumPerRegion = Math.max(5, Math.ceil(maximum / 9));
+  for (const candidate of candidates) {
+    if (selected.length >= maximum) break;
+    const regionX = Math.min(3, Math.floor((candidate.x / width) * 4));
+    const regionY = Math.min(2, Math.floor((candidate.y / height) * 3));
+    const regionId = `${regionX}-${regionY}`;
+    if ((regionCounts.get(regionId) || 0) >= maximumPerRegion) continue;
+    const tooClose = selected.some((feature) => Math.hypot(feature.x - candidate.x, feature.y - candidate.y) < 14);
+    if (tooClose) continue;
     selected.push({
       id: `feature-${selected.length}`,
       x: candidate.x / width,
@@ -69,7 +80,8 @@ export function extractFrameFeatures(context, width, height, maximum = 64) {
       color: colorAt(data, width, candidate.x, candidate.y),
       velocity: { x: 0, y: 0 },
     });
-  });
+    regionCounts.set(regionId, (regionCounts.get(regionId) || 0) + 1);
+  }
   return selected;
 }
 

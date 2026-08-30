@@ -1,8 +1,7 @@
-import { buildCaptureMesh } from './captureMesh';
 import { clamp } from './coverageModel';
 import { descriptorDistance } from './featureTracking';
 
-const DEFAULT_MAX_ANCHORS = 42;
+const DEFAULT_MAX_ANCHORS = 72;
 
 function colorDistance(first = {}, second = {}) {
   const red = (first.r || 0) - (second.r || 0);
@@ -49,63 +48,83 @@ function matchAnchorFeatures(anchorFeatures = [], currentFeatures = [], options 
 function transformPoint(point, transform) {
   return {
     ...point,
-    x: transform.a * point.x - transform.b * point.y + transform.tx,
-    y: transform.b * point.x + transform.a * point.y + transform.ty,
+    x: transform.a * point.x + transform.b * point.y + transform.tx,
+    y: transform.c * point.x + transform.d * point.y + transform.ty,
   };
 }
 
-function transformFromPair(first, second) {
-  const sourceX = second.source.x - first.source.x;
-  const sourceY = second.source.y - first.source.y;
-  const targetX = second.target.x - first.target.x;
-  const targetY = second.target.y - first.target.y;
-  const denominator = sourceX ** 2 + sourceY ** 2;
-  if (denominator < 0.0025) return null;
-  const a = (targetX * sourceX + targetY * sourceY) / denominator;
-  const b = (targetY * sourceX - targetX * sourceY) / denominator;
-  const scale = Math.hypot(a, b);
-  if (scale < 0.58 || scale > 1.72) return null;
-  return {
-    a,
-    b,
-    tx: first.target.x - a * first.source.x + b * first.source.y,
-    ty: first.target.y - b * first.source.x - a * first.source.y,
-  };
+function solve3x3(matrix, vector) {
+  const values = matrix.map((row, index) => [...row, vector[index]]);
+  for (let column = 0; column < 3; column += 1) {
+    let pivot = column;
+    for (let row = column + 1; row < 3; row += 1) {
+      if (Math.abs(values[row][column]) > Math.abs(values[pivot][column])) pivot = row;
+    }
+    if (Math.abs(values[pivot][column]) < 0.0000001) return null;
+    [values[column], values[pivot]] = [values[pivot], values[column]];
+    const divisor = values[column][column];
+    for (let index = column; index < 4; index += 1) values[column][index] /= divisor;
+    for (let row = 0; row < 3; row += 1) {
+      if (row === column) continue;
+      const multiplier = values[row][column];
+      for (let index = column; index < 4; index += 1) values[row][index] -= multiplier * values[column][index];
+    }
+  }
+  return values.map((row) => row[3]);
+}
+
+function isSaneTransform(transform) {
+  if (!transform) return false;
+  const firstScale = Math.hypot(transform.a, transform.c);
+  const secondScale = Math.hypot(transform.b, transform.d);
+  const determinant = transform.a * transform.d - transform.b * transform.c;
+  const axisSimilarity = Math.abs((transform.a * transform.b + transform.c * transform.d)
+    / Math.max(firstScale * secondScale, 0.000001));
+  return firstScale >= 0.52 && firstScale <= 1.9
+    && secondScale >= 0.52 && secondScale <= 1.9
+    && determinant >= 0.28 && determinant <= 3.1
+    && axisSimilarity <= 0.72;
 }
 
 function refineTransform(matches) {
-  if (matches.length < 2) return null;
-  const sourceCenter = matches.reduce((center, match) => ({
-    x: center.x + match.source.x / matches.length,
-    y: center.y + match.source.y / matches.length,
-  }), { x: 0, y: 0 });
-  const targetCenter = matches.reduce((center, match) => ({
-    x: center.x + match.target.x / matches.length,
-    y: center.y + match.target.y / matches.length,
-  }), { x: 0, y: 0 });
-  let denominator = 0;
-  let numeratorA = 0;
-  let numeratorB = 0;
+  if (matches.length < 3) return null;
+  let xx = 0;
+  let xy = 0;
+  let yy = 0;
+  let x = 0;
+  let y = 0;
+  let targetXFromX = 0;
+  let targetXFromY = 0;
+  let targetX = 0;
+  let targetYFromX = 0;
+  let targetYFromY = 0;
+  let targetY = 0;
   matches.forEach((match) => {
-    const sourceX = match.source.x - sourceCenter.x;
-    const sourceY = match.source.y - sourceCenter.y;
-    const targetX = match.target.x - targetCenter.x;
-    const targetY = match.target.y - targetCenter.y;
-    denominator += sourceX ** 2 + sourceY ** 2;
-    numeratorA += sourceX * targetX + sourceY * targetY;
-    numeratorB += sourceX * targetY - sourceY * targetX;
+    xx += match.source.x ** 2;
+    xy += match.source.x * match.source.y;
+    yy += match.source.y ** 2;
+    x += match.source.x;
+    y += match.source.y;
+    targetXFromX += match.source.x * match.target.x;
+    targetXFromY += match.source.y * match.target.x;
+    targetX += match.target.x;
+    targetYFromX += match.source.x * match.target.y;
+    targetYFromY += match.source.y * match.target.y;
+    targetY += match.target.y;
   });
-  if (denominator < 0.0025) return null;
-  const a = numeratorA / denominator;
-  const b = numeratorB / denominator;
-  const scale = Math.hypot(a, b);
-  if (scale < 0.58 || scale > 1.72) return null;
-  return {
-    a,
-    b,
-    tx: targetCenter.x - a * sourceCenter.x + b * sourceCenter.y,
-    ty: targetCenter.y - b * sourceCenter.x - a * sourceCenter.y,
+  const normal = [[xx, xy, x], [xy, yy, y], [x, y, matches.length]];
+  const horizontal = solve3x3(normal, [targetXFromX, targetXFromY, targetX]);
+  const vertical = solve3x3(normal, [targetYFromX, targetYFromY, targetY]);
+  if (!horizontal || !vertical) return null;
+  const transform = {
+    a: horizontal[0],
+    b: horizontal[1],
+    tx: horizontal[2],
+    c: vertical[0],
+    d: vertical[1],
+    ty: vertical[2],
   };
+  return isSaneTransform(transform) ? transform : null;
 }
 
 function inliersForTransform(matches, transform, threshold) {
@@ -121,13 +140,15 @@ export function estimateSurfaceTransform(matches = [], options = {}) {
   if (matches.length < minimumInliers) return null;
   let best = null;
   let checked = 0;
-  for (let first = 0; first < matches.length - 1 && checked < 120; first += 1) {
-    for (let second = first + 1; second < matches.length && checked < 120; second += 1) {
-      checked += 1;
-      const transform = transformFromPair(matches[first], matches[second]);
-      if (!transform) continue;
-      const inliers = inliersForTransform(matches, transform, threshold);
-      if (!best || inliers.length > best.inliers.length) best = { transform, inliers };
+  for (let first = 0; first < matches.length - 2 && checked < 160; first += 1) {
+    for (let second = first + 1; second < matches.length - 1 && checked < 160; second += 1) {
+      for (let third = second + 1; third < matches.length && checked < 160; third += 1) {
+        checked += 1;
+        const transform = refineTransform([matches[first], matches[second], matches[third]]);
+        if (!transform) continue;
+        const inliers = inliersForTransform(matches, transform, threshold);
+        if (!best || inliers.length > best.inliers.length) best = { transform, inliers };
+      }
     }
   }
   if (!best || best.inliers.length < minimumInliers) return null;
@@ -147,7 +168,7 @@ export function estimateSurfaceTransform(matches = [], options = {}) {
 }
 
 export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp }, options = {}) {
-  const maximumFeatures = options.maximumFeatures ?? 64;
+  const maximumFeatures = options.maximumFeatures ?? 56;
   const anchorFeatures = features
     .filter((feature) => feature.descriptor?.length)
     .slice(0, maximumFeatures)
@@ -156,15 +177,17 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
       id: `${id}-point-${index}`,
       confidence: clamp(0.58 + Math.min(feature.score || 0, 180) / 600),
     }));
-  if (anchorFeatures.length < 8) return null;
-  const patches = buildCaptureMesh(anchorFeatures, {
-    maximumEdge: 0.22,
-    maximumArea: 0.014,
-    maximumTriangles: 72,
-    maximumPerAnchor: 4,
-  });
-  if (!patches.length) return null;
-  return { id, timestamp, viewpoint, features: anchorFeatures, patches };
+  if (anchorFeatures.length < 6) return null;
+  const stickers = anchorFeatures.map((feature, index) => ({
+    id: `${id}-sticker-${index}`,
+    anchorId: id,
+    x: feature.x,
+    y: feature.y,
+    radius: 0.022 + clamp((feature.score || 0) / 260) * 0.014,
+    confidence: feature.confidence,
+    seed: (index * 17 + id.length * 11) % 31,
+  }));
+  return { id, timestamp, viewpoint, features: anchorFeatures, stickers };
 }
 
 export function appendSurfaceAnchor(anchors = [], anchor, maximum = DEFAULT_MAX_ANCHORS) {
@@ -173,7 +196,7 @@ export function appendSurfaceAnchor(anchors = [], anchor, maximum = DEFAULT_MAX_
 }
 
 export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], options = {}) {
-  const maximumVisibleAnchors = options.maximumVisibleAnchors ?? 2;
+  const maximumVisibleAnchors = options.maximumVisibleAnchors ?? 3;
   const localizations = anchors.map((anchor) => {
     const matches = matchAnchorFeatures(anchor.features, currentFeatures, options);
     const transform = estimateSurfaceTransform(matches, options);
@@ -184,20 +207,20 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
       || second.transform.inlierCount - first.transform.inlierCount)
     .slice(0, maximumVisibleAnchors);
 
-  const patches = localizations.flatMap(({ anchor, transform }) => anchor.patches.map((patch) => {
-    const vertices = patch.vertices.map((vertex) => transformPoint(vertex, transform));
-    const centroid = transformPoint(patch.centroid, transform);
+  const stickers = localizations.flatMap(({ anchor, transform }) => anchor.stickers.map((sticker) => {
+    const position = transformPoint(sticker, transform);
     return {
-      ...patch,
-      id: `${anchor.id}-${patch.id}`,
+      ...sticker,
       anchorId: anchor.id,
-      confidence: clamp(patch.confidence * (0.58 + transform.confidence * 0.42)),
-      vertices,
-      centroid,
+      x: position.x,
+      y: position.y,
+      radius: sticker.radius * Math.sqrt(
+        Math.hypot(transform.a, transform.c) * Math.hypot(transform.b, transform.d),
+      ),
+      confidence: clamp(sticker.confidence * (0.58 + transform.confidence * 0.42)),
     };
-  })).filter((patch) => patch.vertices.every((vertex) => (
-    vertex.x > -0.16 && vertex.x < 1.16 && vertex.y > -0.16 && vertex.y < 1.16
-  )));
+  })).filter((sticker) => sticker.x > -0.12 && sticker.x < 1.12
+    && sticker.y > -0.12 && sticker.y < 1.12);
 
-  return { patches, localizations };
+  return { stickers, localizations };
 }

@@ -1,4 +1,5 @@
 import {
+  createSurfaceAnchor,
   estimateSurfaceTransform,
   localizeSurfaceAnchors,
 } from './surfaceAnchors';
@@ -32,33 +33,62 @@ test('estimates a persistent surface transform from visual matches', () => {
   expect(transform.ty).toBeCloseTo(-0.035, 3);
 });
 
-test('reprojects a saved mesh when the same surface returns to view', () => {
+test('accepts a perspective-like affine surface change and rejects an outlier', () => {
+  const target = source.map((point, index) => ({
+    ...point,
+    x: point.x * 1.06 + point.y * 0.16 + 0.03 + (index === 4 ? 0.28 : 0),
+    y: point.x * -0.08 + point.y * 0.94 + 0.04 + (index === 4 ? -0.22 : 0),
+  }));
+  const matches = source.map((point, index) => ({ source: point, target: target[index] }));
+
+  const transform = estimateSurfaceTransform(matches);
+
+  expect(transform).not.toBeNull();
+  expect(transform.inlierCount).toBe(4);
+  expect(transform.b).toBeCloseTo(0.16, 2);
+  expect(transform.c).toBeCloseTo(-0.08, 2);
+});
+
+test('creates scan stickers without requiring polygon geometry', () => {
+  const features = [...source, feature('f', 0.66, 0.31, [0.5, 0.2, 0.1, 0.7, 0.3])]
+    .map((item, index) => ({ ...item, score: 80 + index * 3 }));
+
+  const anchor = createSurfaceAnchor({ id: 'chair', features, timestamp: 1 });
+
+  expect(anchor).not.toBeNull();
+  expect(anchor.stickers).toHaveLength(6);
+  expect(anchor.stickers.every((sticker) => sticker.anchorId === 'chair')).toBe(true);
+});
+
+test('reprojects saved stickers when the same surface returns to view', () => {
   const anchor = {
     id: 'wall-1',
     features: source,
-    patches: [{
-      id: 'triangle',
+    stickers: [{
+      id: 'wall-sticker',
+      anchorId: 'wall-1',
       confidence: 0.9,
-      vertices: source.slice(0, 3).map(({ x, y }) => ({ x, y, depth: 0.5 })),
-      centroid: { x: 0.2867, y: 0.3033, depth: 0.5 },
+      x: source[0].x,
+      y: source[0].y,
+      radius: 0.03,
     }],
   };
 
   const result = localizeSurfaceAnchors([anchor], moved);
 
   expect(result.localizations).toHaveLength(1);
-  expect(result.patches).toHaveLength(1);
-  expect(result.patches[0].vertices[0].x).toBeCloseTo(moved[0].x, 3);
-  expect(result.patches[0].vertices[0].y).toBeCloseTo(moved[0].y, 3);
+  expect(result.stickers).toHaveLength(1);
+  expect(result.stickers[0].x).toBeCloseTo(moved[0].x, 3);
+  expect(result.stickers[0].y).toBeCloseTo(moved[0].y, 3);
 });
 
 test('does not leave a mesh floating when the surface cannot be recognized', () => {
   const result = localizeSurfaceAnchors([{
     id: 'wall-1',
     features: source,
-    patches: [],
+    stickers: [],
   }], source.slice(0, 3));
 
   expect(result.localizations).toEqual([]);
-  expect(result.patches).toEqual([]);
+  expect(result.stickers).toEqual([]);
 });
