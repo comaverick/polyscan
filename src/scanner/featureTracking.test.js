@@ -1,4 +1,5 @@
 import {
+  buildFrameEvidence,
   extractFrameFeatures,
   matchFrameFeatures,
 } from './featureTracking';
@@ -41,6 +42,23 @@ test('finds repeatable details after a camera-like image translation', () => {
   expect(previous.length).toBeGreaterThan(30);
   expect(current.length).toBeGreaterThan(30);
   expect(matches.length).toBeGreaterThan(12);
+});
+
+test('accumulates slow motion from the last saved viewpoint', () => {
+  const width = 160;
+  const height = 120;
+  const reference = featuresFrom(texturedImage(width, height), width, height);
+  const previous = featuresFrom(texturedImage(width, height, 2, 2), width, height);
+  const current = featuresFrom(texturedImage(width, height, 6, 6), width, height);
+  const evidence = buildFrameEvidence({
+    previousFrame: { features: previous },
+    currentFrame: { features: current },
+    referenceViewpoint: { yaw: 0, pitch: 0 },
+    referenceFeatures: reference,
+  });
+
+  expect(evidence.referenceParallax).toBeGreaterThan(evidence.frameParallax);
+  expect(evidence.parallax).toBe(evidence.referenceParallax);
 });
 
 test('relocalizes real extracted descriptors instead of perfect test descriptors', () => {

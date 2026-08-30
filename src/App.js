@@ -47,6 +47,7 @@ import RoomModelViewer from './viewer/RoomModelViewer';
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
+const MAX_SURFACE_ANCHORS = 56;
 const SURFACE_LOCK_OPTIONS = Object.freeze({
   minimumTransformConfidence: 0.5,
   minimumInliers: 5,
@@ -90,6 +91,14 @@ function isMobileScanDevice() {
   const mobileUserAgent = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
   const iPadDesktopMode = /Macintosh/i.test(navigator.userAgent || '') && navigator.maxTouchPoints > 1;
   return previewOverride || mobileUserAgent || iPadDesktopMode;
+}
+
+function isCameraScanDevice() {
+  if (isMobileScanDevice()) return true;
+  // Keep the scanner usable on a desktop browser with a webcam. This is also
+  // useful for development because the same camera code path can be exercised
+  // without pretending a desktop has phone motion sensors.
+  return typeof navigator !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia);
 }
 
 const createEmptyScanState = () => ({
@@ -187,8 +196,11 @@ function SurfaceStickerCanvas({ stickers, patches = [], videoRef }) {
       if (!active || Math.hypot(active.x - sticker.x, active.y - sticker.y) > 0.13) return sticker;
       return {
         ...sticker,
-        x: active.x * 0.62 + sticker.x * 0.38,
-        y: active.y * 0.62 + sticker.y * 0.38,
+        // Optical flow is the frame-to-frame lock. The descriptor relock is
+        // only a correction, so a noisy match cannot yank a marker across the
+        // wall on every analysis tick.
+        x: active.x * 0.82 + sticker.x * 0.18,
+        y: active.y * 0.82 + sticker.y * 0.18,
         confidence: Math.max(active.confidence || 0, sticker.confidence || 0),
       };
     });
@@ -207,8 +219,8 @@ function SurfaceStickerCanvas({ stickers, patches = [], videoRef }) {
       return {
         ...patch,
         vertices: patch.vertices.map((vertex, index) => ({
-          x: active.vertices[index].x * 0.58 + vertex.x * 0.42,
-          y: active.vertices[index].y * 0.58 + vertex.y * 0.42,
+          x: active.vertices[index].x * 0.82 + vertex.x * 0.18,
+          y: active.vertices[index].y * 0.82 + vertex.y * 0.18,
         })),
         confidence: Math.max(active.confidence || 0, patch.confidence || 0),
       };
@@ -500,7 +512,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
           <p className="eyebrow">Spatial camera</p>
           <h1>Capture the room.<br /><span>Reconstruct it for real.</span></h1>
           <p className="launch-description">
-            Collect overlapping camera views on your phone, then build a walkable room model with photogrammetry.
+            Collect overlapping camera views from your phone or webcam, then build a walkable room model with photogrammetry.
           </p>
           {scanAvailable ? (
             <div className="launch-actions">
@@ -525,7 +537,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
           ) : (
             <div className="desktop-scan-note" role="status">
               <strong>Open PolyScan on your phone</strong>
-              <span>Live scanning uses the phone camera and motion sensors.</span>
+              <span>Live scanning uses a phone camera or a desktop webcam.</span>
             </div>
           )}
         </div>
@@ -733,6 +745,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         currentFrame,
         orientation,
         referenceViewpoint: current.cameraKeyframes[current.cameraKeyframes.length - 1]?.viewpoint,
+        referenceFeatures: current.cameraKeyframes[current.cameraKeyframes.length - 1]?.image?.features || [],
         thresholds: DEFAULT_VIEWPOINT_THRESHOLDS,
       });
       const featureTracks = updateFeatureTracks(current.featureTracks, evidence.matches, currentFrame.timestamp);
@@ -778,7 +791,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       // let a blue region come back when the user returns to that exact view.
       const shouldCreateSurfaceAnchor = shouldCaptureKeyframe
         && currentFrame.features.length >= 6
-        && (current.surfaceAnchors || []).length < 48;
+        && (current.surfaceAnchors || []).length < MAX_SURFACE_ANCHORS;
       const newSurfaceAnchor = shouldCreateSurfaceAnchor
         ? createSurfaceAnchor({
           id: keyframeId,
@@ -787,30 +800,37 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           timestamp: currentFrame.timestamp,
         })
         : null;
-      const surfaceAnchors = appendSurfaceAnchor(current.surfaceAnchors || [], newSurfaceAnchor, 48);
+      const surfaceAnchors = appendSurfaceAnchor(current.surfaceAnchors || [], newSurfaceAnchor, MAX_SURFACE_ANCHORS);
       const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features, SURFACE_LOCK_OPTIONS);
+      const hasCurrentSurfaceLock = surfaceMap.localizations.length > 0 || Boolean(newSurfaceAnchor);
       const currentSurfaceCoverage = surfaceMap.coverageCells?.length
         ? surfaceMap.coverageCells
         : surfaceMap.patches;
       const newSurfaceCoverage = newSurfaceAnchor?.coverageCells?.length
         ? newSurfaceAnchor.coverageCells
         : (newSurfaceAnchor?.patches || []);
-      const visibleSurfaceStickers = newSurfaceAnchor
+      const visibleSurfaceStickers = hasCurrentSurfaceLock && newSurfaceAnchor
         && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
         ? [
           ...surfaceMap.stickers,
           ...newSurfaceAnchor.stickers,
         ]
-        : surfaceMap.stickers;
-      const visibleSurfacePatches = newSurfaceAnchor
+        : hasCurrentSurfaceLock
+          ? surfaceMap.stickers
+          : (current.visibleSurfaceStickers || []);
+      const visibleSurfacePatches = hasCurrentSurfaceLock && newSurfaceAnchor
         && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
         ? [
           ...currentSurfaceCoverage,
           ...newSurfaceCoverage,
         ]
-        : currentSurfaceCoverage;
-      const visibleSurfaceAnchorCount = surfaceMap.localizations.length
-        + (newSurfaceAnchor && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id) ? 1 : 0);
+        : hasCurrentSurfaceLock
+          ? currentSurfaceCoverage
+          : (current.visibleSurfacePatches || []);
+      const visibleSurfaceAnchorCount = hasCurrentSurfaceLock
+        ? surfaceMap.localizations.length
+          + (newSurfaceAnchor && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id) ? 1 : 0)
+        : (current.visibleSurfaceAnchorCount || 0);
 
       const nextState = {
         ...current,
@@ -900,9 +920,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <section className="scan-preview-frame" aria-label="Room camera preview">
         <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
         <CameraPlaceholder />
+        {/* Keep the last recognized surface visible through a brief tracking
+            dropout. Clearing it on one blurry frame made a wall look like it
+            had been unscanned again even though the lock was still valid. */}
         <SurfaceStickerCanvas
-          stickers={trackingState === 'tracking' ? surfaceStickers : []}
-          patches={trackingState === 'tracking' ? surfacePatches : []}
+          stickers={surfaceStickers}
+          patches={surfacePatches}
           videoRef={videoRef}
         />
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
@@ -1080,7 +1103,7 @@ function ProcessingScreen({ buildState, onOpenViewer, onRetry, onBack }) {
 }
 
 function App() {
-  const scanAvailable = isMobileScanDevice();
+  const scanAvailable = isCameraScanDevice();
   const [screen, setScreen] = useState('launch');
   const [paused, setPaused] = useState(false);
   const [scanState, setScanState] = useState(createEmptyScanState);
@@ -1200,7 +1223,7 @@ function App() {
   };
 
   const startScan = () => {
-    if (!isMobileScanDevice()) return;
+    if (!isCameraScanDevice()) return;
     cameraSessionRef.current += 1;
     stopCamera();
     buildAbortRef.current?.abort();

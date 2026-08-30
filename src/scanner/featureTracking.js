@@ -153,21 +153,42 @@ export function updateFeatureTracks(previousTracks = [], matches = [], timestamp
   return [...tracksById.values()];
 }
 
-export function buildFrameEvidence({ previousFrame, currentFrame, orientation = {}, referenceViewpoint, thresholds }) {
+export function buildFrameEvidence({ previousFrame, currentFrame, orientation = {}, referenceViewpoint, referenceFeatures = [], thresholds }) {
   const previousFeatures = previousFrame?.features || [];
   const currentFeatures = currentFrame.features || [];
   const matches = matchFrameFeatures(previousFeatures, currentFeatures);
   const stableTrackCount = matches.filter((match) => match.confidence >= 0.24).length;
   const featureConfidence = clamp(stableTrackCount / Math.max(12, Math.min(previousFeatures.length || currentFeatures.length || 1, 32)));
-  const parallax = matches.length
-    ? matches.reduce((sum, match) => sum + match.displacement, 0) / matches.length
-    : 0;
+  const median = (values) => {
+    if (!values.length) return 0;
+    const ordered = [...values].sort((first, second) => first - second);
+    const middle = Math.floor(ordered.length / 2);
+    return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+  };
+  const parallax = median(matches
+    .filter((match) => match.confidence >= 0.2)
+    .map((match) => match.displacement));
+  // A slow room sweep can move only a few pixels between two analysis ticks.
+  // Compare against the last saved viewpoint as well, otherwise the scan
+  // never accumulates enough motion to save the next view.
+  const referenceMatches = referenceFeatures.length
+    ? matchFrameFeatures(referenceFeatures, currentFeatures, {
+      maxDistance: 0.56,
+      maxDescriptorDistance: 0.7,
+    })
+    : [];
+  const referenceParallax = median(referenceMatches
+    .filter((match) => match.confidence >= 0.16)
+    .map((match) => match.displacement));
+  const accumulatedParallax = Math.max(parallax, referenceParallax);
   const yaw = Number.isFinite(orientation.yaw) ? orientation.yaw : 0;
   const pitch = Number.isFinite(orientation.pitch) ? orientation.pitch : 0;
   const viewpoint = {
     yaw,
     pitch,
-    parallax,
+    parallax: accumulatedParallax,
+    frameParallax: parallax,
+    referenceParallax,
     translationMeters: orientation.translationMeters,
     stableMatches: stableTrackCount,
   };
@@ -189,7 +210,9 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
     stableFeatures,
     stableTrackCount,
     featureConfidence,
-    parallax,
+    parallax: accumulatedParallax,
+    frameParallax: parallax,
+    referenceParallax,
     tracking,
     usefulViewpoint,
     viewpoint,

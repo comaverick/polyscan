@@ -54,9 +54,19 @@ test('viewer embeds only a reconstruction service result', () => {
   expect(screen.getByTitle('Reconstructed 3D room viewer')).toHaveAttribute('src', 'https://viewer.example.test/room/1');
 });
 
-test('keeps live scanning unavailable on desktop browsers', () => {
+test('keeps live scanning unavailable when no camera API exists', () => {
   window.history.replaceState({}, '', '/');
   render(<App />);
   expect(screen.queryByRole('button', { name: /start scan/i })).not.toBeInTheDocument();
   expect(screen.getByText('Open PolyScan on your phone')).toBeInTheDocument();
+});
+
+test('exposes the scanner to a desktop browser with a webcam API', () => {
+  Object.defineProperty(navigator, 'mediaDevices', {
+    configurable: true,
+    value: { getUserMedia: jest.fn() },
+  });
+  window.history.replaceState({}, '', '/');
+  render(<App />);
+  expect(screen.getByRole('button', { name: /start scan/i })).toBeInTheDocument();
 });

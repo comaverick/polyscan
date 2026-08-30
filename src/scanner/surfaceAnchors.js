@@ -11,8 +11,8 @@ function colorDistance(first = {}, second = {}) {
 }
 
 function matchAnchorFeatures(anchorFeatures = [], currentFeatures = [], options = {}) {
-  const maximumDescriptorDistance = options.maximumDescriptorDistance ?? 0.78;
-  const ratio = options.ratio ?? 0.9;
+  const maximumDescriptorDistance = options.maximumDescriptorDistance ?? 0.7;
+  const ratio = options.ratio ?? 0.84;
   const candidates = [];
 
   anchorFeatures.forEach((source) => {
@@ -35,10 +35,24 @@ function matchAnchorFeatures(anchorFeatures = [], currentFeatures = [], options 
     candidates.push(best);
   });
 
+  // A descriptor that only matches in one direction is often a repeated
+  // texture (curtains, wall grain, or a highlight). Requiring the target to
+  // choose the same source removes most of those floating false locks before
+  // RANSAC ever estimates a surface transform.
+  const bestSourceByTarget = new Map();
+  candidates.forEach((candidate) => {
+    const previous = bestSourceByTarget.get(candidate.targetIndex);
+    if (!previous || candidate.rank < previous.rank) {
+      bestSourceByTarget.set(candidate.targetIndex, candidate);
+    }
+  });
+
   const usedTargets = new Set();
   return candidates
     .sort((first, second) => first.rank - second.rank)
     .filter((candidate) => {
+      const reverse = bestSourceByTarget.get(candidate.targetIndex);
+      if (!reverse || reverse.source !== candidate.source) return false;
       if (usedTargets.has(candidate.targetIndex)) return false;
       usedTargets.add(candidate.targetIndex);
       return true;
@@ -282,6 +296,85 @@ function createCoverageCells(tileId, patch, columns = 6, rows = 6) {
   return cells;
 }
 
+function coverageCellBounds(cell) {
+  const xs = cell.vertices.map((point) => point.x);
+  const ys = cell.vertices.map((point) => point.y);
+  return {
+    minX: Math.min(...xs),
+    maxX: Math.max(...xs),
+    minY: Math.min(...ys),
+    maxY: Math.max(...ys),
+  };
+}
+
+function coverageCellArea(cell) {
+  return Math.abs(cell.vertices.reduce((sum, point, index, vertices) => {
+    const next = vertices[(index + 1) % vertices.length];
+    return sum + point.x * next.y - next.x * point.y;
+  }, 0)) / 2;
+}
+
+function coverageCellCenter(cell) {
+  return cell.vertices.reduce((center, point) => ({
+    x: center.x + point.x / cell.vertices.length,
+    y: center.y + point.y / cell.vertices.length,
+  }), { x: 0, y: 0 });
+}
+
+function overlapRatio(firstBounds, secondBounds, firstArea, secondArea) {
+  const width = Math.max(0, Math.min(firstBounds.maxX, secondBounds.maxX)
+    - Math.max(firstBounds.minX, secondBounds.minX));
+  const height = Math.max(0, Math.min(firstBounds.maxY, secondBounds.maxY)
+    - Math.max(firstBounds.minY, secondBounds.minY));
+  const intersection = width * height;
+  return intersection / Math.max(0.000001, Math.min(firstArea, secondArea));
+}
+
+function dedupeCoverageCells(cells = []) {
+  const candidates = cells
+    .map((cell) => ({
+      cell,
+      area: coverageCellArea(cell),
+      bounds: coverageCellBounds(cell),
+      center: coverageCellCenter(cell),
+    }))
+    .filter(({ cell, area, bounds }) => area >= 0.00004
+      && area <= 0.2
+      && bounds.minX > -0.4 && bounds.maxX < 1.4
+      && bounds.minY > -0.4 && bounds.maxY < 1.4
+      && cell.vertices.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)))
+    .sort((first, second) => (second.cell.confidence || 0) - (first.cell.confidence || 0));
+  const selected = [];
+  candidates.forEach((candidate) => {
+    const duplicate = selected.some((existing) => {
+      const centerDistance = Math.hypot(
+        candidate.center.x - existing.center.x,
+        candidate.center.y - existing.center.y,
+      );
+      const centerLimit = Math.max(0.016, Math.sqrt(Math.min(candidate.area, existing.area)) * 0.82);
+      return centerDistance <= centerLimit
+        || overlapRatio(candidate.bounds, existing.bounds, candidate.area, existing.area) >= 0.58;
+    });
+    if (!duplicate) selected.push(candidate);
+  });
+  return selected.map(({ cell }) => cell);
+}
+
+function dedupeSurfaceStickers(stickers = []) {
+  const selected = [];
+  stickers
+    .filter((sticker) => Number.isFinite(sticker.x) && Number.isFinite(sticker.y))
+    .sort((first, second) => (second.confidence || 0) - (first.confidence || 0))
+    .forEach((sticker) => {
+      const duplicate = selected.some((existing) => Math.hypot(
+        sticker.x - existing.x,
+        sticker.y - existing.y,
+      ) < 0.018);
+      if (!duplicate) selected.push(sticker);
+    });
+  return selected;
+}
+
 export function estimateSurfaceTransform(matches = [], options = {}) {
   const threshold = options.inlierThreshold ?? 0.048;
   const minimumInliers = options.minimumInliers ?? 4;
@@ -305,6 +398,8 @@ export function estimateSurfaceTransform(matches = [], options = {}) {
   const refined = refinePerspectiveTransform(best.inliers) || refineTransform(best.inliers) || best.transform;
   const inliers = inliersForTransform(matches, refined, threshold);
   if (inliers.length < minimumInliers) return null;
+  const minimumInlierRatio = options.minimumInlierRatio ?? 0.66;
+  if (matches.length >= 7 && inliers.length / matches.length < minimumInlierRatio) return null;
   const averageError = inliers.reduce((sum, match) => {
     const projected = transformPoint(match.source, refined);
     return sum + Math.hypot(projected.x - match.target.x, projected.y - match.target.y);
@@ -412,7 +507,7 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
       || second.transform.inlierCount - first.transform.inlierCount)
     .slice(0, maximumVisibleAnchors);
 
-  const stickers = localizations.flatMap(({ tile, transform }) => tile.stickers.map((sticker) => {
+  const stickers = dedupeSurfaceStickers(localizations.flatMap(({ tile, transform }) => tile.stickers.map((sticker) => {
     const position = transformPoint(sticker, transform);
     return {
       ...sticker,
@@ -425,7 +520,7 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
       confidence: clamp(sticker.confidence * (0.58 + transform.confidence * 0.42)),
     };
   })).filter((sticker) => sticker.x > -0.12 && sticker.x < 1.12
-    && sticker.y > -0.12 && sticker.y < 1.12);
+    && sticker.y > -0.12 && sticker.y < 1.12));
 
   const coverageStickers = localizations.flatMap(({ tile, transform }) => (tile.coverageStickers || []).map((sticker) => {
     const position = transformPoint(sticker, transform);
@@ -442,12 +537,12 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
   })).filter((sticker) => sticker.x > -0.12 && sticker.x < 1.12
     && sticker.y > -0.12 && sticker.y < 1.12);
 
-  const coverageCells = localizations.flatMap(({ tile, transform }) => (tile.coverageCells || []).map((cell) => ({
+  const coverageCells = dedupeCoverageCells(localizations.flatMap(({ tile, transform }) => (tile.coverageCells || []).map((cell) => ({
     ...cell,
     anchorId: tile.id,
     vertices: cell.vertices.map((point) => transformPoint(point, transform)),
     confidence: clamp(cell.confidence * (0.58 + transform.confidence * 0.42)),
-  }))).filter((cell) => cell.vertices.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
+  }))));
 
   const patches = localizations.map(({ anchor, tile, transform }) => ({
     id: tile.id,
