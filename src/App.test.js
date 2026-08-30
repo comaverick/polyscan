@@ -21,7 +21,7 @@ test('opens the camera with blue unscanned tint and a surface sticker layer', ()
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
   expect(screen.getByRole('button', { name: /done scanning, waiting/i })).toBeDisabled();
-  expect(screen.getByText(/Frame a wall corner with furniture or a doorway/i)).toBeInTheDocument();
+  expect(screen.getByText(/Reconnect the camera/i)).toBeInTheDocument();
   expect(document.querySelector('.surface-sticker-canvas')).toHaveAttribute('data-surface-stickers', '0');
   expect(document.querySelector('.coverage-canvas')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Directional room coverage map')).not.toBeInTheDocument();

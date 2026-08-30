@@ -524,6 +524,11 @@ button { font: inherit; }
 }
 
 .scan-frame-count { color: rgba(209, 227, 246, .56); }
+.scan-quality-label { color: rgba(220, 243, 255, .9); font-size: 10px; font-weight: 650; letter-spacing: .03em; }
+.scan-quality-label.is-fast { color: #ffd08a; }
+.scan-quality-label.is-lost,
+.scan-quality-label.is-detail { color: #ffb5b9; }
+.scan-quality-label.is-confirmed { color: #b9f5ff; }
 .scan-live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #a8e7ff; box-shadow: 0 0 0 3px rgba(125, 205, 255, .13); }
 .scan-live-dot.is-recording { background: #ff6d74; box-shadow: 0 0 0 3px rgba(255, 84, 94, .15), 0 0 13px rgba(255, 70, 81, .75); }
 
@@ -577,7 +582,8 @@ button { font: inherit; }
 .scan-record-button.is-recording { border-color: #ff9aa0; }
 .scan-record-button.is-recording .record-button-core { width: 30px; height: 30px; border-radius: 8px; background: #ff6670; }
 .scan-record-button:active { transform: scale(.95); }
-.scan-map-control { display: grid; width: 78px; height: 78px; place-items: center; justify-self: center; border: 1px solid rgba(215, 248, 255, .42); border-radius: 50%; background: rgba(9, 17, 26, .46); box-shadow: 0 0 0 5px rgba(8, 13, 20, .25), 0 12px 30px rgba(0, 0, 0, .24); }
+.scan-map-control { display: grid; width: 78px; height: 78px; place-items: center; justify-self: center; border: 1px solid rgba(215, 248, 255, .42); border-radius: 50%; background: rgba(9, 17, 26, .46); color: inherit; cursor: pointer; box-shadow: 0 0 0 5px rgba(8, 13, 20, .25), 0 12px 30px rgba(0, 0, 0, .24); appearance: none; }
+.scan-map-control:active { transform: scale(.96); }
 .scan-map-control-core { display: grid; width: 56px; height: 56px; place-items: center; border: 1px solid rgba(215, 248, 255, .58); border-radius: 50%; background: rgba(159, 226, 250, .13); color: #dffaff; box-shadow: 0 0 22px rgba(114, 218, 255, .28); }
 .scan-map-control.is-active .scan-map-control-core { animation: scan-map-pulse 2.2s ease-in-out infinite; }
 @keyframes scan-map-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(123, 222, 255, .2), 0 0 22px rgba(114, 218, 255, .28); } 50% { box-shadow: 0 0 0 7px rgba(123, 222, 255, .04), 0 0 30px rgba(114, 218, 255, .45); } }

@@ -196,6 +196,13 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
     : [];
   const referenceParallax = coherentParallax(referenceMatches, 0.22);
   const accumulatedParallax = Math.max(parallax, referenceParallax);
+  // A large frame-to-frame jump is not useful capture evidence. It usually
+  // means the phone was swung too quickly or the frame is blurred. Keeping it
+  // out of the keyframe stream prevents the mapper from accepting a bad view.
+  const medianRawDisplacement = median(matches.map((match) => match.displacement));
+  const largeMotionMatches = matches.filter((match) => match.displacement >= 0.1).length;
+  const tooFast = (largeMotionMatches >= 8 && medianRawDisplacement >= 0.16)
+    || (referenceParallax >= 0.28 && stableTrackCount < 12);
   const yaw = Number.isFinite(orientation.yaw) ? orientation.yaw : 0;
   const pitch = Number.isFinite(orientation.pitch) ? orientation.pitch : 0;
   const viewpoint = {
@@ -208,7 +215,8 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
     stableMatches: stableTrackCount,
   };
   const tracking = currentFeatures.length >= 6 && (previousFrame == null || stableTrackCount >= 4);
-  const usefulViewpoint = tracking && isDistinctViewpoint(referenceViewpoint || previousFrame?.viewpoint, viewpoint, thresholds);
+  const usefulViewpoint = tracking && !tooFast
+    && isDistinctViewpoint(referenceViewpoint || previousFrame?.viewpoint, viewpoint, thresholds);
   const stableFeatures = matches
     .filter((match) => match.confidence >= 0.24)
     .map((match) => ({
@@ -228,6 +236,7 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
     parallax: accumulatedParallax,
     frameParallax: parallax,
     referenceParallax,
+    tooFast,
     tracking,
     usefulViewpoint,
     viewpoint,

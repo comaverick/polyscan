@@ -49,3 +49,45 @@ export function getScanCoachAdvice({ directionalCoverage, keyframes = 0, trackin
   }
   return { title: 'Room coverage looks good', instruction: 'Make one final slow pass around any area you skipped, then finish the scan.', reason: 'You have broad coverage across the room.' };
 }
+
+export function getLiveScanAdvice({
+  cameraState = 'idle',
+  trackingState = 'searching',
+  keyframes = 0,
+  visibleDetailCount = 0,
+  evidence,
+  recording = false,
+  surfaceLocked = false,
+} = {}) {
+  if (cameraState === 'requesting') {
+    return { state: 'camera', label: 'Allow camera', title: 'Allow camera access', instruction: 'Choose Allow so PolyScan can see the room.', reason: 'The camera preview is required before PolyScan can compare surfaces.' };
+  }
+  if (cameraState !== 'live') {
+    return { state: 'camera', label: 'Camera unavailable', title: 'Camera unavailable', instruction: 'Reconnect the camera, then try again.', reason: 'A live preview is needed to save trustworthy room views.' };
+  }
+  if (!recording) {
+    return { state: 'ready', label: 'Ready', title: 'Tap record to begin', instruction: 'Tap the center button once, then move slowly to start mapping.', reason: 'PolyScan waits for your tap before saving viewpoints.' };
+  }
+  if (visibleDetailCount < 8) {
+    return { state: 'detail', label: 'Find detail', title: 'Find visual detail', instruction: 'Aim at a corner, edge, pattern, or piece of furniture.', reason: 'Edges and texture give the mapper something stable to follow.' };
+  }
+  if (trackingState === 'lost' || !evidence?.tracking) {
+    return { state: 'lost', label: 'Tracking lost', title: 'Find the last surface', instruction: 'Slow down and point back at the last detailed surface.', reason: 'Return to the last confirmed detail so the map can relocalize.' };
+  }
+  if (evidence?.tooFast) {
+    return { state: 'fast', label: 'Slow down', title: 'Slow down', instruction: 'Move the phone more slowly so the surface can be measured.', reason: 'Fast motion causes blur and unreliable feature matches.' };
+  }
+  if (evidence?.usefulViewpoint) {
+    return {
+      state: 'confirmed',
+      label: surfaceLocked ? 'Surface confirmed' : 'View confirmed',
+      title: surfaceLocked ? 'Surface confirmed' : 'View confirmed',
+      instruction: 'Good overlap. Continue slowly and keep part of the previous view visible.',
+      reason: 'This view overlaps the map, so it can contribute to the room model.',
+    };
+  }
+  if (keyframes === 0) {
+    return { state: 'start', label: 'Move to start', title: 'Move device to start', instruction: 'Hold a corner in view, then make a slow sideways move.', reason: 'A controlled first move gives the mapper a reliable baseline.' };
+  }
+  return { state: 'tracking', label: 'Tracking', title: 'Hold this surface', instruction: 'Keep the same details in view and move gently sideways.', reason: 'Sideways overlap helps estimate depth instead of only rotating in place.' };
+}

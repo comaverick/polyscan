@@ -66,6 +66,26 @@ test('accumulates slow motion from the last saved viewpoint', () => {
   expect(evidence.parallax).toBe(evidence.referenceParallax);
 });
 
+test('rejects a large jump as too fast to save', () => {
+  const reference = Array.from({ length: 8 }, (_, index) => ({
+    id: `reference-${index}`,
+    x: 0.12 + (index % 4) * 0.2,
+    y: 0.2 + Math.floor(index / 4) * 0.3,
+    descriptor: [index, 1, 0, 0],
+    color: { r: 120, g: 130, b: 140 },
+    velocity: { x: 0, y: 0 },
+  }));
+  const current = reference.map((feature) => ({ ...feature, x: feature.x + 0.17, y: feature.y + 0.02 }));
+  const evidence = buildFrameEvidence({
+    previousFrame: { features: reference },
+    currentFrame: { features: current },
+    referenceFeatures: reference,
+  });
+
+  expect(evidence.tooFast).toBe(true);
+  expect(evidence.usefulViewpoint).toBe(false);
+});
+
 test('relocalizes real extracted descriptors instead of perfect test descriptors', () => {
   const width = 160;
   const height = 120;
