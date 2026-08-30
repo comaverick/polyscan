@@ -83,6 +83,9 @@ export function trackPointsWithVision(cv, previousGray, currentRgba, width, heig
   const nextPoints = new cv.Mat();
   const status = new cv.Mat();
   const error = new cv.Mat();
+  const previousPointsCheck = new cv.Mat();
+  const backwardStatus = new cv.Mat();
+  const backwardError = new cv.Mat();
   let keepCurrentFrame = false;
   try {
     cv.cvtColor(source, currentGray, cv.COLOR_RGBA2GRAY);
@@ -97,14 +100,33 @@ export function trackPointsWithVision(cv, previousGray, currentRgba, width, heig
       3,
       new cv.TermCriteria(cv.TermCriteria_COUNT + cv.TermCriteria_EPS, 20, 0.03),
     );
+    cv.calcOpticalFlowPyrLK(
+      currentGray,
+      previousGray,
+      nextPoints,
+      previousPointsCheck,
+      backwardStatus,
+      backwardError,
+      new cv.Size(21, 21),
+      3,
+      new cv.TermCriteria(cv.TermCriteria_COUNT + cv.TermCriteria_EPS, 20, 0.03),
+    );
     const next = nextPoints.data32F;
     const flags = status.data;
     const errors = error.data32F;
+    const previousCheck = previousPointsCheck.data32F;
+    const backwardFlags = backwardStatus.data;
+    const backwardErrors = backwardError.data32F;
     const tracked = points.map((point, index) => {
-      if (!flags[index] || errors[index] > 22) return null;
+      if (!flags[index] || !backwardFlags[index] || errors[index] > 22 || backwardErrors[index] > 22) return null;
       const x = next[index * 2] / width;
       const y = next[index * 2 + 1] / height;
       if (x < -0.05 || x > 1.05 || y < -0.05 || y > 1.05) return null;
+      const backwardDistance = Math.hypot(
+        previousCheck[index * 2] / width - point.x,
+        previousCheck[index * 2 + 1] / height - point.y,
+      );
+      if (backwardDistance > Math.max(0.014, 2.8 / Math.min(width, height))) return null;
       return {
         ...point,
         previousX: point.x,
@@ -122,6 +144,9 @@ export function trackPointsWithVision(cv, previousGray, currentRgba, width, heig
     nextPoints.delete();
     status.delete();
     error.delete();
+    previousPointsCheck.delete();
+    backwardStatus.delete();
+    backwardError.delete();
     if (!keepCurrentFrame) currentGray.delete();
   }
 }

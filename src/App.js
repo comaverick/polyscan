@@ -100,7 +100,6 @@ const createEmptyScanState = () => ({
   stableFeatures: [],
   surfaceAnchors: [],
   visibleSurfaceStickers: [],
-  visibleSurfacePatches: [],
   visibleSurfaceAnchorCount: 0,
   lastFrame: null,
   lastViewpoint: null,
@@ -125,33 +124,6 @@ function VersionBadge({ className = '' }) {
   return <span className={`app-version ${className}`.trim()} aria-label={`PolyScan version ${APP_VERSION}`}>v{APP_VERSION}</span>;
 }
 
-function shiftTrackedPatches(patches, previousStickers, nextStickers) {
-  if (!patches.length || !previousStickers.length || !nextStickers.length) return patches;
-  const previousById = new Map(previousStickers.map((point) => [point.id, point]));
-  const shifts = new Map();
-  nextStickers.forEach((point) => {
-    const previous = previousById.get(point.id);
-    if (!previous) return;
-    const key = point.anchorId || 'active-surface';
-    shifts.set(key, [...(shifts.get(key) || []), { x: point.x - previous.x, y: point.y - previous.y }]);
-  });
-  const median = (values) => {
-    const ordered = [...values].sort((first, second) => first - second);
-    const middle = Math.floor(ordered.length / 2);
-    return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
-  };
-  return patches.map((patch) => {
-    const motion = shifts.get(patch.id) || shifts.get(patch.anchorId);
-    if (!motion || motion.length < 2) return patch;
-    const dx = median(motion.map((point) => point.x));
-    const dy = median(motion.map((point) => point.y));
-    return {
-      ...patch,
-      vertices: patch.vertices.map((vertex) => ({ x: vertex.x + dx, y: vertex.y + dy })),
-    };
-  });
-}
-
 function CameraPlaceholder() {
   return (
     <div className="camera-placeholder" aria-hidden="true">
@@ -168,10 +140,9 @@ function CameraPlaceholder() {
   );
 }
 
-function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }) {
+function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
   const canvasRef = useRef(null);
   const activeStickersRef = useRef([]);
-  const activePatchesRef = useRef([]);
   const lastExternalLockRef = useRef(0);
 
   useEffect(() => {
@@ -192,27 +163,6 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
     });
     lastExternalLockRef.current = performance.now();
   }, [stickers]);
-
-  useEffect(() => {
-    if (!patches.length) {
-      activePatchesRef.current = [];
-      return;
-    }
-    const activeById = new Map(activePatchesRef.current.map((patch) => [patch.id, patch]));
-    activePatchesRef.current = patches.map((patch) => {
-      const active = activeById.get(patch.id);
-      if (!active || active.vertices.length !== patch.vertices.length) return patch;
-      return {
-        ...patch,
-        vertices: patch.vertices.map((vertex, index) => ({
-          x: active.vertices[index].x * 0.68 + vertex.x * 0.32,
-          y: active.vertices[index].y * 0.68 + vertex.y * 0.32,
-        })),
-        confidence: Math.max(active.confidence || 0, patch.confidence || 0),
-      };
-    });
-    lastExternalLockRef.current = performance.now();
-  }, [patches]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -256,7 +206,7 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
 
       context.fillStyle = mappingReady ? 'rgba(24, 81, 210, .5)' : 'rgba(24, 81, 210, .62)';
       context.fillRect(0, 0, width, height);
-      if (!visibleStickers.length && !activePatchesRef.current.length) return;
+      if (!visibleStickers.length) return;
 
       const video = trackedVideo;
       const sourceWidth = video?.videoWidth || width;
@@ -271,36 +221,25 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
         y: cropY + point.y * drawnHeight,
       });
 
-      // The shape is fixed when the surface is captured. Tracked features only
-      // move this quad; they never get to redraw a new noisy outline each frame.
-      const projectedPatches = activePatchesRef.current
-        .map((patch) => patch.vertices.map(projectPoint))
-        .filter((vertices) => vertices.length >= 4);
-
       context.save();
       context.globalCompositeOperation = 'destination-out';
-      projectedPatches.forEach((vertices) => {
-        context.beginPath();
-        context.moveTo(vertices[0].x, vertices[0].y);
-        vertices.slice(1).forEach((point) => context.lineTo(point.x, point.y));
-        context.closePath();
+      visibleStickers.forEach((sticker) => {
+        const point = projectPoint(sticker);
+        const side = Math.max(8, Math.min(16, sticker.radius * Math.min(drawnWidth, drawnHeight) * 0.42));
         context.fillStyle = 'rgba(0, 0, 0, .98)';
-        context.fill();
+        context.fillRect(point.x - side / 2, point.y - side / 2, side, side);
       });
       context.restore();
 
-      // Keep the confirmation subtle: it is an edge on the real surface, not a
-      // floating 3D object that hides the camera image underneath it.
+      // A small square confirms the exact tracked feature without implying that
+      // a rough 2D outline is a full 3D surface.
       context.save();
       context.strokeStyle = 'rgba(211, 249, 255, .24)';
-      context.lineWidth = Math.max(1, Math.min(width, height) * 0.0012);
-      context.lineJoin = 'round';
-      projectedPatches.forEach((vertices) => {
-        context.beginPath();
-        context.moveTo(vertices[0].x, vertices[0].y);
-        vertices.slice(1).forEach((point) => context.lineTo(point.x, point.y));
-        context.closePath();
-        context.stroke();
+      context.lineWidth = 1;
+      visibleStickers.forEach((sticker) => {
+        const point = projectPoint(sticker);
+        const side = Math.max(8, Math.min(16, sticker.radius * Math.min(drawnWidth, drawnHeight) * 0.42));
+        context.strokeRect(point.x - side / 2, point.y - side / 2, side, side);
       });
       context.restore();
     };
@@ -317,7 +256,6 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
           let acceptCurrentReference = true;
           if (vision) {
             if (previousVisionFrame && activeStickersRef.current.length) {
-              const previousStickers = activeStickersRef.current;
               const flow = trackPointsWithVision(
                 vision,
                 previousVisionFrame,
@@ -330,13 +268,11 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
                 previousVisionFrame.delete();
                 previousVisionFrame = flow.currentGray;
                 activeStickersRef.current = flow.points;
-                activePatchesRef.current = shiftTrackedPatches(activePatchesRef.current, previousStickers, flow.points);
                 lastGoodFlowAt = timestamp;
               } else {
                 flow?.currentGray?.delete();
                 if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
                   activeStickersRef.current = [];
-                  activePatchesRef.current = [];
                 }
               }
             } else {
@@ -344,7 +280,6 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
               previousVisionFrame = createVisionFrame(vision, imageData);
             }
           } else if (previousGray && activeStickersRef.current.length) {
-            const previousStickers = activeStickersRef.current;
             const flow = trackSurfaceStickerGroups(
               previousGray,
               currentGray,
@@ -354,11 +289,9 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
             );
             if (flow.trackedCount >= 3 && flow.confidence >= 0.66) {
               activeStickersRef.current = flow.stickers;
-              activePatchesRef.current = shiftTrackedPatches(activePatchesRef.current, previousStickers, flow.stickers);
               lastGoodFlowAt = timestamp;
             } else if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
               activeStickersRef.current = [];
-              activePatchesRef.current = [];
             } else {
               // Keep the last sharp reference through a brief blur or autofocus
               // pulse so the next good frame can recover the same surface.
@@ -371,7 +304,6 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
           previousVisionFrame?.delete();
           previousVisionFrame = null;
           activeStickersRef.current = [];
-          activePatchesRef.current = [];
         }
       }
       draw();
@@ -782,7 +714,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
         ? [...surfaceMap.stickers, ...newSurfaceAnchor.stickers]
         : surfaceMap.stickers;
-      const visibleSurfacePatches = surfaceMap.patches || [];
       const visibleSurfaceAnchorCount = surfaceMap.localizations.length
         + (newSurfaceAnchor && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id) ? 1 : 0);
 
@@ -797,7 +728,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         stableFeatures: evidence.stableFeatures,
         surfaceAnchors,
         visibleSurfaceStickers,
-        visibleSurfacePatches,
         visibleSurfaceAnchorCount,
         lastFrame: { ...currentFrame, viewpoint: evidence.viewpoint },
         lastViewpoint: evidence.viewpoint,
@@ -822,7 +752,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   }) || (keyframeCount >= 8 && scanState.frameCount >= 20);
   const mappingReady = keyframeCount > 0;
   const surfaceStickers = scanState.visibleSurfaceStickers || [];
-  const surfacePatches = scanState.visibleSurfacePatches || [];
   const minimumViews = 28;
   const roomShellCovered = hasCompleteRoomCoverage(scanState.directionalCoverage);
   const fullRoomReady = keyframeCount >= minimumViews && viable && roomShellCovered;
@@ -876,7 +805,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         <CameraPlaceholder />
         <SurfaceStickerCanvas
           stickers={trackingState === 'tracking' ? surfaceStickers : []}
-          patches={trackingState === 'tracking' ? surfacePatches : []}
           mappingReady={mappingReady}
           videoRef={videoRef}
         />
