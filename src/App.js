@@ -130,6 +130,41 @@ function CameraPlaceholder() {
   );
 }
 
+function groupSurfacePoints(points = []) {
+  return points.reduce((groups, point) => {
+    const key = point.anchorId || 'active-surface';
+    groups.set(key, [...(groups.get(key) || []), point]);
+    return groups;
+  }, new Map());
+}
+
+function surfaceHull(points = []) {
+  const unique = [...new Map(points.map((point) => [
+    `${Math.round(point.x * 10000)}-${Math.round(point.y * 10000)}`,
+    point,
+  ])).values()];
+  if (unique.length < 3) return [];
+  const sorted = [...unique].sort((first, second) => first.x - second.x || first.y - second.y);
+  const cross = (origin, first, second) => (
+    (first.x - origin.x) * (second.y - origin.y) - (first.y - origin.y) * (second.x - origin.x)
+  );
+  const buildHalf = (source) => source.reduce((hull, point) => {
+    while (hull.length >= 2 && cross(hull[hull.length - 2], hull[hull.length - 1], point) <= 0) hull.pop();
+    hull.push(point);
+    return hull;
+  }, []);
+  const lower = buildHalf(sorted);
+  const upper = buildHalf([...sorted].reverse());
+  return [...lower.slice(0, -1), ...upper.slice(0, -1)];
+}
+
+function polygonArea(points = []) {
+  return Math.abs(points.reduce((area, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return area + point.x * next.y - next.x * point.y;
+  }, 0) / 2);
+}
+
 function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
   const canvasRef = useRef(null);
   const activeStickersRef = useRef([]);
@@ -208,19 +243,37 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
         y: cropY + point.y * drawnHeight,
       });
 
+      // A capture is shown as one coherent piece of the surface, not a cloud of
+      // screen-space dots. Its outline is rebuilt from tracked image features on
+      // every frame, so the revealed camera image moves with the wall or object.
+      const patches = [...groupSurfacePoints(visibleStickers).values()]
+        .map((group) => surfaceHull(group.map(projectPoint)))
+        .filter((hull) => hull.length >= 3 && polygonArea(hull) >= 110);
+
       context.save();
       context.globalCompositeOperation = 'destination-out';
-      visibleStickers.forEach((sticker) => {
-        const point = projectPoint(sticker);
-        const radius = Math.max(10, sticker.radius * Math.min(drawnWidth, drawnHeight));
-        const gradient = context.createRadialGradient(point.x, point.y, radius * 0.16, point.x, point.y, radius);
-        gradient.addColorStop(0, `rgba(0, 0, 0, ${0.9 + (sticker.confidence || 0) * 0.1})`);
-        gradient.addColorStop(0.68, `rgba(0, 0, 0, ${0.68 + (sticker.confidence || 0) * 0.22})`);
-        gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      patches.forEach((hull) => {
         context.beginPath();
-        context.arc(point.x, point.y, radius, 0, Math.PI * 2);
-        context.fillStyle = gradient;
+        context.moveTo(hull[0].x, hull[0].y);
+        hull.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+        context.closePath();
+        context.fillStyle = 'rgba(0, 0, 0, .98)';
         context.fill();
+      });
+      context.restore();
+
+      // Keep the confirmation subtle: it is an edge on the real surface, not a
+      // floating 3D object that hides the camera image underneath it.
+      context.save();
+      context.strokeStyle = 'rgba(211, 249, 255, .54)';
+      context.lineWidth = Math.max(1, Math.min(width, height) * 0.003);
+      context.lineJoin = 'round';
+      patches.forEach((hull) => {
+        context.beginPath();
+        context.moveTo(hull[0].x, hull[0].y);
+        hull.slice(1).forEach((point) => context.lineTo(point.x, point.y));
+        context.closePath();
+        context.stroke();
       });
       context.restore();
     };
