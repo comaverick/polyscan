@@ -1,5 +1,6 @@
 import {
   mergePointCloud,
+  getStableScanMarkers,
   requestDepthSession,
   sampleDepthPointCloud,
   serializePointCloudToPly,
@@ -44,4 +45,14 @@ test('voxel merges repeated depth samples and serializes a valid PLY', () => {
   expect(ply).toContain('element vertex 2');
   expect(ply).toContain('property float z');
   expect(ply).toContain('end_header');
+});
+
+test('stable scan markers keep one world-space position per coarse voxel', () => {
+  const markers = getStableScanMarkers([
+    { x: 1, y: 2, z: 3 },
+    { x: 1.03, y: 2.01, z: 3.02 },
+    { x: 1.2, y: 2, z: 3 },
+  ], { markerVoxelSize: 0.08 });
+  expect(markers).toHaveLength(2);
+  expect(markers[0]).toEqual({ x: 1, y: 2, z: 3 });
 });

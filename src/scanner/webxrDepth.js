@@ -4,6 +4,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   maximumDepth: 12,
   voxelSize: 0.025,
   maximumPoints: 80000,
+  markerVoxelSize: 0.08,
+  maximumMarkers: 12000,
 });
 
 function canUseNavigatorXR() {
@@ -119,6 +121,30 @@ export function mergePointCloud(previousPoints = [], nextPoints = [], options = 
     if (!voxels.has(key)) voxels.set(key, point);
   });
   return [...voxels.values()].slice(0, settings.maximumPoints);
+}
+
+/**
+ * Produces a coarser, stable subset for the live scan visualization. The
+ * marker key is derived from an already merged world-space point, so returning
+ * to a surface reuses the same marker instead of moving a screen overlay.
+ */
+export function getStableScanMarkers(points = [], options = {}) {
+  const settings = { ...DEFAULT_OPTIONS, ...options };
+  const markers = new Map();
+  points.forEach((point) => {
+    if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y) || !Number.isFinite(point?.z)) return;
+    const key = [
+      Math.round(point.x / settings.markerVoxelSize),
+      Math.round(point.y / settings.markerVoxelSize),
+      Math.round(point.z / settings.markerVoxelSize),
+    ].join(':');
+    if (!markers.has(key)) markers.set(key, {
+      x: point.x,
+      y: point.y,
+      z: point.z,
+    });
+  });
+  return [...markers.values()].slice(0, settings.maximumMarkers);
 }
 
 export function serializePointCloudToPly(points = []) {

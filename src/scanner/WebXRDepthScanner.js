@@ -1,5 +1,10 @@
 import { useEffect, useRef } from 'react';
-import { mergePointCloud, sampleDepthPointCloud, WEBXR_DEPTH_OPTIONS } from './webxrDepth';
+import {
+  getStableScanMarkers,
+  mergePointCloud,
+  sampleDepthPointCloud,
+  WEBXR_DEPTH_OPTIONS,
+} from './webxrDepth';
 
 /**
  * Renders the real ARCore depth samples in the WebXR reference space. The
@@ -18,6 +23,9 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
     let pointGeometry;
     let pointMaterial;
     let pointCloud;
+    let markerGeometry;
+    let markerMaterial;
+    let markerMesh;
     let positionAttribute;
     let colorAttribute;
     let referenceSpace;
@@ -40,6 +48,18 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
       colorAttribute.needsUpdate = true;
       pointGeometry.setDrawRange(0, count);
       pointGeometry.computeBoundingSphere();
+    };
+
+    const updateMarkers = (THREE) => {
+      if (!markerMesh || !points.length) return;
+      const markers = getStableScanMarkers(points);
+      const matrix = new THREE.Matrix4();
+      markers.forEach((point, index) => {
+        matrix.makeTranslation(point.x, point.y, point.z);
+        markerMesh.setMatrixAt(index, matrix);
+      });
+      markerMesh.count = markers.length;
+      markerMesh.instanceMatrix.needsUpdate = true;
     };
 
     const resize = () => {
@@ -87,6 +107,23 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
         });
         pointCloud = new THREE.Points(pointGeometry, pointMaterial);
         scene.add(pointCloud);
+        markerGeometry = new THREE.BoxGeometry(
+          WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.68,
+          WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.68,
+          WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.68,
+        );
+        markerMaterial = new THREE.MeshBasicMaterial({
+          color: 0x63b9ff,
+          transparent: true,
+          opacity: 0.62,
+          wireframe: true,
+          depthWrite: false,
+        });
+        markerMesh = new THREE.InstancedMesh(markerGeometry, markerMaterial, WEBXR_DEPTH_OPTIONS.maximumMarkers);
+        markerMesh.count = 0;
+        markerMesh.frustumCulled = false;
+        markerMesh.renderOrder = 2;
+        scene.add(markerMesh);
         resize();
         resizeObserver = window.ResizeObserver ? new ResizeObserver(resize) : null;
         resizeObserver?.observe(canvas);
@@ -100,6 +137,7 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
             if (freshPoints.length) {
               points = mergePointCloud(points, freshPoints);
               updateGeometry();
+              updateMarkers(THREE);
               if (time - lastPublishedAt > 450) {
                 lastPublishedAt = time;
                 onPointCloud(points);
@@ -122,6 +160,8 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
       resizeObserver?.disconnect();
       pointGeometry?.dispose();
       pointMaterial?.dispose();
+      markerGeometry?.dispose();
+      markerMaterial?.dispose();
       renderer?.dispose();
     };
   }, [onPointCloud, onSessionError, session]);
