@@ -74,6 +74,7 @@ test('creates scan stickers without requiring polygon geometry', () => {
   expect(anchor).not.toBeNull();
   expect(anchor.stickers).toHaveLength(6);
   expect(anchor.stickers.every((sticker) => sticker.anchorId.startsWith('chair-tile-'))).toBe(true);
+  expect(anchor.patches.length).toBeGreaterThan(0);
   expect(anchor.coverageStickers.length).toBeGreaterThan(0);
   expect(anchor.coverageStickers.every((sticker) => sticker.trackable === false)).toBe(true);
 });
@@ -98,6 +99,7 @@ test('reprojects saved stickers when the same surface returns to view', () => {
   expect(result.stickers).toHaveLength(1);
   expect(result.stickers[0].x).toBeCloseTo(moved[0].x, 3);
   expect(result.stickers[0].y).toBeCloseTo(moved[0].y, 3);
+  expect(result.patches).toHaveLength(1);
 });
 
 test('does not leave a mesh floating when the surface cannot be recognized', () => {

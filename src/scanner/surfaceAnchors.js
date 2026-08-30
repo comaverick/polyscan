@@ -333,6 +333,12 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
     viewpoint,
     features: anchorFeatures,
     tiles,
+    patches: tiles.map((tile) => ({
+      id: tile.id,
+      anchorId: id,
+      vertices: tile.patch,
+      confidence: 0.7,
+    })),
     stickers: tiles.flatMap((tile) => tile.stickers),
     coverageStickers: tiles.flatMap((tile) => tile.coverageStickers || []),
   };
