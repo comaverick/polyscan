@@ -437,7 +437,8 @@ button { font: inherit; }
 .scan-preview-frame .camera-placeholder,
 .scan-preview-frame .coverage-canvas,
 .scan-preview-frame .capture-guidance-layer,
-.scan-preview-frame .capture-mesh-canvas {
+.scan-preview-frame .capture-mesh-canvas,
+.scan-preview-frame .xr-depth-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -447,7 +448,9 @@ button { font: inherit; }
 .scan-preview-frame .camera-video { z-index: 0; background: transparent; }
 .scan-preview-frame .camera-placeholder { z-index: -1; }
 .scan-preview-frame .coverage-canvas,
-.scan-preview-frame .capture-mesh-canvas { z-index: 1; }
+.scan-preview-frame .capture-mesh-canvas,
+.scan-preview-frame .xr-depth-canvas { z-index: 1; pointer-events: none; }
+.scan-preview-frame .xr-depth-canvas { display: block; }
 .scan-screen::after { z-index: 2; background: linear-gradient(180deg, rgba(0, 0, 0, .46), transparent 22%, transparent 67%, rgba(0, 0, 0, .86)); }
 
 .scan-reference-top {

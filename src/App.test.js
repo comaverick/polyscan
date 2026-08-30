@@ -17,12 +17,12 @@ test('starts with a scan action and no progress UI', () => {
   expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
 });
 
-test('opens the camera with a user-controlled finish action and surface sticker layer', () => {
+test('opens the camera with a user-controlled finish action and no fake geometry layer', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
   expect(screen.getByRole('button', { name: 'Done scanning' })).toBeEnabled();
-  expect(screen.getByText(/Open PolyScan on HTTPS/i)).toBeInTheDocument();
-  expect(document.querySelector('.surface-sticker-canvas')).toHaveAttribute('data-surface-stickers', '0');
+  expect(screen.getByText(/Allow camera access/i)).toBeInTheDocument();
+  expect(document.querySelector('.surface-sticker-canvas')).not.toBeInTheDocument();
   expect(document.querySelector('.coverage-canvas')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Directional room coverage map')).not.toBeInTheDocument();
   expect(screen.queryByText('Adaptive scan guide')).not.toBeInTheDocument();
@@ -32,7 +32,7 @@ test('opens the camera with a user-controlled finish action and surface sticker 
 test('does not silently stay on starting camera when camera access is unavailable', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
-  expect(screen.getByRole('alert')).toHaveTextContent(/camera access is needed/i);
+  expect(screen.getByRole('alert')).toHaveTextContent(/allow camera access/i);
   expect(screen.getByRole('button', { name: 'Done scanning' })).toBeEnabled();
 });
 

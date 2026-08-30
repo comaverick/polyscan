@@ -2,7 +2,7 @@
 
 PolyScan is a mobile-web room capture interface backed by real photogrammetry. The phone records overlapping, full-size image keyframes and an optional video. A reconstruction worker turns those assets into a room mesh, and the React app opens the result in a touch-first first-person viewer.
 
-The blue camera layer is capture guidance only. It is not depth data and it is not the reconstructed room.
+On Android Chrome devices that support WebXR depth, PolyScan requests an ARCore depth session and saves a world-space point cloud directly from the room. On iPhone/Safari and browsers without WebXR depth, PolyScan uses the camera-only fallback: overlapping full-size keyframes and video are sent to the reconstruction service. The fallback is intentionally kept separate from the Android depth path so it never presents guessed screen-space grids as 3D geometry.
 
 ## Run the web app
 
@@ -12,6 +12,25 @@ npm start
 ```
 
 Live camera capture requires HTTPS when opened from a phone. For desktop interface testing, open `http://localhost:3000/?mobilePreview=1`.
+
+## Spatial capture modes
+
+```text
+Android Chrome + ARCore depth
+  -> WebXR immersive-ar session
+  -> world-space CPU depth samples
+  -> local PLY point cloud
+  -> in-app first-person point-cloud viewer
+
+iPhone/Safari or unsupported browser
+  -> full-size JPEG keyframes and optional video
+  -> reconstruction upload service
+  -> COLMAP Structure-from-Motion and Multi-View Stereo
+  -> PLY/GLB room model
+  -> in-app Three.js first-person viewer
+```
+
+Android depth capture requires HTTPS, a WebXR-capable Chrome build, an ARCore-supported device, and Google Play Services for AR. Vercel sends the required `xr-spatial-tracking` Permissions-Policy header from `vercel.json`.
 
 ## Reconstruction architecture
 

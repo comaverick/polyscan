@@ -13,20 +13,8 @@ import {
   extractFrameFeatures,
   updateFeatureTracks,
 } from './scanner/featureTracking';
-import {
-  appendSurfaceAnchor,
-  createSurfaceAnchor,
-  localizeSurfaceAnchors,
-} from './scanner/surfaceAnchors';
-import {
-  grayscaleFromImageData,
-  trackSurfaceStickerGroups,
-} from './scanner/surfaceFlow';
-import {
-  createVisionFrame,
-  loadVisionRuntime,
-  trackPointsWithVision,
-} from './scanner/visionRuntime';
+import WebXRDepthScanner from './scanner/WebXRDepthScanner';
+import { requestDepthSession, serializePointCloudToPly } from './scanner/webxrDepth';
 import {
   captureVideoKeyframe,
   countCapturedKeyframes,
@@ -44,12 +32,6 @@ import RoomModelViewer from './viewer/RoomModelViewer';
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
-const MAX_SURFACE_ANCHORS = 56;
-const SURFACE_LOCK_OPTIONS = Object.freeze({
-  minimumTransformConfidence: 0.5,
-  minimumInliers: 5,
-  inlierThreshold: 0.04,
-});
 
 function getReconstructionViewerUrl(result) {
   const value = result?.viewerUrl || result?.viewer?.url;
@@ -105,10 +87,7 @@ const createEmptyScanState = () => ({
   distinctViewpoints: 0,
   meaningfulCameraMotion: false,
   stableFeatures: [],
-  surfaceAnchors: [],
-  visibleSurfaceStickers: [],
-  visibleSurfacePatches: [],
-  visibleSurfaceAnchorCount: 0,
+  webXRPointCloud: [],
   lastFrame: null,
   lastViewpoint: null,
   lastEvidence: null,
@@ -145,266 +124,6 @@ function CameraPlaceholder() {
       <div className="placeholder-console-top" />
       <div className="placeholder-light" />
     </div>
-  );
-}
-
-function shiftTrackedPatches(patches, previousStickers, nextStickers) {
-  if (!patches.length || !previousStickers.length || !nextStickers.length) return patches;
-  const previousById = new Map(previousStickers.map((point) => [point.id, point]));
-  const shifts = new Map();
-  nextStickers.forEach((point) => {
-    if (point.trackable === false) return;
-    const previous = previousById.get(point.id);
-    if (!previous) return;
-    const key = point.anchorId || 'active-surface';
-    shifts.set(key, [...(shifts.get(key) || []), { x: point.x - previous.x, y: point.y - previous.y }]);
-  });
-  const median = (values) => {
-    const ordered = [...values].sort((first, second) => first - second);
-    const middle = Math.floor(ordered.length / 2);
-    return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
-  };
-  return patches.map((patch) => {
-    const motion = shifts.get(patch.id) || shifts.get(patch.anchorId);
-    if (!motion || motion.length < 2) return patch;
-    const dx = median(motion.map((point) => point.x));
-    const dy = median(motion.map((point) => point.y));
-    return {
-      ...patch,
-      vertices: patch.vertices.map((vertex) => ({ x: vertex.x + dx, y: vertex.y + dy })),
-    };
-  });
-}
-
-function SurfaceStickerCanvas({ stickers, patches = [], videoRef }) {
-  const canvasRef = useRef(null);
-  const activeStickersRef = useRef([]);
-  const activePatchesRef = useRef([]);
-  const lastExternalLockRef = useRef(0);
-
-  useEffect(() => {
-    if (!stickers.length) {
-      activeStickersRef.current = [];
-      return;
-    }
-    const activeById = new Map(activeStickersRef.current.map((sticker) => [sticker.id, sticker]));
-    activeStickersRef.current = stickers.map((sticker) => {
-      const active = activeById.get(sticker.id);
-      if (!active || Math.hypot(active.x - sticker.x, active.y - sticker.y) > 0.13) return sticker;
-      return {
-        ...sticker,
-        // Optical flow is the frame-to-frame lock. The descriptor relock is
-        // only a correction, so a noisy match cannot yank a marker across the
-        // wall on every analysis tick.
-        x: active.x * 0.82 + sticker.x * 0.18,
-        y: active.y * 0.82 + sticker.y * 0.18,
-        confidence: Math.max(active.confidence || 0, sticker.confidence || 0),
-      };
-    });
-    lastExternalLockRef.current = performance.now();
-  }, [stickers]);
-
-  useEffect(() => {
-    if (!patches.length) {
-      activePatchesRef.current = [];
-      return;
-    }
-    const activeById = new Map(activePatchesRef.current.map((patch) => [patch.id, patch]));
-    activePatchesRef.current = patches.map((patch) => {
-      const active = activeById.get(patch.id);
-      if (!active || active.vertices.length !== patch.vertices.length) return patch;
-      return {
-        ...patch,
-        vertices: patch.vertices.map((vertex, index) => ({
-          x: active.vertices[index].x * 0.82 + vertex.x * 0.18,
-          y: active.vertices[index].y * 0.82 + vertex.y * 0.18,
-        })),
-        confidence: Math.max(active.confidence || 0, patch.confidence || 0),
-      };
-    });
-    lastExternalLockRef.current = performance.now();
-  }, [patches]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-    const context = canvas.getContext('2d');
-    if (!context) return undefined;
-    const trackedVideo = videoRef?.current;
-    const trackingCanvas = document.createElement('canvas');
-    const trackingWidth = 192;
-    const trackingHeight = 144;
-    trackingCanvas.width = trackingWidth;
-    trackingCanvas.height = trackingHeight;
-    const trackingContext = trackingCanvas.getContext('2d', { willReadFrequently: true });
-    let previousGray = null;
-    let lastProcessedAt = 0;
-    let lastGoodFlowAt = performance.now();
-    let animationHandle = null;
-    let videoFrameHandle = null;
-    let cancelled = false;
-    let vision = null;
-    let previousVisionFrame = null;
-    loadVisionRuntime().then((runtime) => {
-      if (!cancelled) vision = runtime;
-    }).catch(() => {
-      // The lightweight fallback remains available if WebAssembly cannot load.
-    });
-
-    const draw = (visibleStickers = activeStickersRef.current) => {
-      const rect = canvas.getBoundingClientRect();
-      const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
-      const width = Math.max(1, rect.width);
-      const height = Math.max(1, rect.height);
-      const renderWidth = Math.round(width * pixelRatio);
-      const renderHeight = Math.round(height * pixelRatio);
-      if (canvas.width !== renderWidth || canvas.height !== renderHeight) {
-        canvas.width = renderWidth;
-        canvas.height = renderHeight;
-      }
-      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-      context.clearRect(0, 0, width, height);
-
-      const video = trackedVideo;
-      const sourceWidth = video?.videoWidth || width;
-      const sourceHeight = video?.videoHeight || height;
-      const coverScale = Math.max(width / sourceWidth, height / sourceHeight);
-      const drawnWidth = sourceWidth * coverScale;
-      const drawnHeight = sourceHeight * coverScale;
-      const cropX = (width - drawnWidth) / 2;
-      const cropY = (height - drawnHeight) / 2;
-      const projectPoint = (point) => ({
-        x: cropX + point.x * drawnWidth,
-        y: cropY + point.y * drawnHeight,
-      });
-
-      if (!visibleStickers.length) return;
-
-      // These points are the only live “scanned” indication. Every point is a
-      // real image feature that was matched back to a saved view, so the UI
-      // never fills a guessed rectangle or connects unrelated objects.
-      context.save();
-      context.lineWidth = 1;
-      visibleStickers.forEach((sticker) => {
-        const point = projectPoint(sticker);
-        const side = Math.max(8, Math.min(16, sticker.radius * Math.min(drawnWidth, drawnHeight) * 0.42));
-        const isCoverage = sticker.kind === 'surface-coverage';
-        context.fillStyle = isCoverage ? 'rgba(64, 145, 255, .3)' : 'rgba(64, 145, 255, .56)';
-        context.strokeStyle = isCoverage ? 'rgba(196, 231, 255, .54)' : 'rgba(196, 231, 255, .88)';
-        context.fillRect(point.x - side / 2, point.y - side / 2, side, side);
-        context.strokeRect(point.x - side / 2, point.y - side / 2, side, side);
-      });
-      context.restore();
-    };
-
-    const processFrame = (timestamp) => {
-      if (cancelled) return;
-      const video = trackedVideo;
-      if (trackingContext && video?.readyState >= 2 && timestamp - lastProcessedAt >= 66) {
-        lastProcessedAt = timestamp;
-        try {
-          trackingContext.drawImage(video, 0, 0, trackingWidth, trackingHeight);
-          const imageData = trackingContext.getImageData(0, 0, trackingWidth, trackingHeight);
-          const currentGray = grayscaleFromImageData(imageData);
-          let acceptCurrentReference = true;
-          if (vision) {
-            if (previousVisionFrame && activeStickersRef.current.length) {
-              const flow = trackPointsWithVision(
-                vision,
-                previousVisionFrame,
-                imageData,
-                trackingWidth,
-                trackingHeight,
-                activeStickersRef.current,
-              );
-              if (flow?.points.length >= 3) {
-                activePatchesRef.current = shiftTrackedPatches(
-                  activePatchesRef.current,
-                  activeStickersRef.current,
-                  flow.points,
-                );
-                previousVisionFrame.delete();
-                previousVisionFrame = flow.currentGray;
-                activeStickersRef.current = flow.points;
-                lastGoodFlowAt = timestamp;
-              } else {
-                flow?.currentGray?.delete();
-                if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
-                  activeStickersRef.current = [];
-                  activePatchesRef.current = [];
-                }
-              }
-            } else {
-              previousVisionFrame?.delete();
-              previousVisionFrame = createVisionFrame(vision, imageData);
-            }
-          } else if (previousGray && activeStickersRef.current.length) {
-            const flow = trackSurfaceStickerGroups(
-              previousGray,
-              currentGray,
-              trackingWidth,
-              trackingHeight,
-              activeStickersRef.current,
-            );
-            if (flow.trackedCount >= 3 && flow.confidence >= 0.66) {
-              activePatchesRef.current = shiftTrackedPatches(
-                activePatchesRef.current,
-                activeStickersRef.current,
-                flow.stickers,
-              );
-              activeStickersRef.current = flow.stickers;
-              lastGoodFlowAt = timestamp;
-            } else if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
-              activeStickersRef.current = [];
-              activePatchesRef.current = [];
-            } else {
-              // Keep the last sharp reference through a brief blur or autofocus
-              // pulse so the next good frame can recover the same surface.
-              acceptCurrentReference = false;
-            }
-          }
-          if (acceptCurrentReference) previousGray = currentGray;
-        } catch {
-          previousGray = null;
-          previousVisionFrame?.delete();
-          previousVisionFrame = null;
-          activeStickersRef.current = [];
-          activePatchesRef.current = [];
-        }
-      }
-      draw();
-      if (video?.requestVideoFrameCallback) {
-        videoFrameHandle = video.requestVideoFrameCallback(processFrame);
-      } else {
-        animationHandle = window.requestAnimationFrame(processFrame);
-      }
-    };
-
-    draw();
-    const handleResize = () => draw();
-    const resizeObserver = window.ResizeObserver ? new ResizeObserver(handleResize) : null;
-    resizeObserver?.observe(canvas);
-    window.addEventListener('resize', handleResize);
-    processFrame(performance.now());
-    return () => {
-      cancelled = true;
-      if (animationHandle != null) window.cancelAnimationFrame(animationHandle);
-      if (videoFrameHandle != null && trackedVideo?.cancelVideoFrameCallback) trackedVideo.cancelVideoFrameCallback(videoFrameHandle);
-      previousVisionFrame?.delete();
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', handleResize);
-    };
-  }, [videoRef]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className="capture-mesh-canvas surface-sticker-canvas"
-      data-mesh-patches={patches.length}
-      data-surface-patches={patches.length}
-      data-surface-stickers={stickers.length}
-      aria-hidden="true"
-    />
   );
 }
 
@@ -540,7 +259,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
   );
 }
 
-function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, onRetryCamera, onCancel, onImportCapture }) {
+function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, xrSession, onXrError, onRetryCamera, onCancel, onImportCapture }) {
   const videoRef = useRef(null);
   const analysisCanvasRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
@@ -686,6 +405,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     try { recorder.stop(); } catch { finalize(); }
   }), []);
 
+  const publishXrPointCloud = useCallback((points) => {
+    const nextState = { ...scanRef.current, webXRPointCloud: points };
+    scanRef.current = nextState;
+    onScanStateChange(nextState);
+  }, [onScanStateChange]);
+
   useEffect(() => {
     if (paused) return undefined;
 
@@ -756,34 +481,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           capturePromise: captureVideoKeyframe(video),
         }]
         : current.cameraKeyframes;
-      // Keep a surface snapshot for each genuinely new camera viewpoint. A
-      // single anchor can follow a wall for a short pan, but it cannot describe
-      // the new section that enters the frame later. These snapshots are what
-      // let a blue region come back when the user returns to that exact view.
-      const shouldCreateSurfaceAnchor = shouldCaptureKeyframe
-        && currentFrame.features.length >= 6
-        && (current.surfaceAnchors || []).length < MAX_SURFACE_ANCHORS;
-      const newSurfaceAnchor = shouldCreateSurfaceAnchor
-        ? createSurfaceAnchor({
-          id: keyframeId,
-          features: currentFrame.features,
-          viewpoint: evidence.viewpoint,
-          timestamp: currentFrame.timestamp,
-        })
-        : null;
-      const previousSurfaceAnchors = current.surfaceAnchors || [];
-      const surfaceAnchors = appendSurfaceAnchor(previousSurfaceAnchors, newSurfaceAnchor, MAX_SURFACE_ANCHORS);
-      // Never localize an anchor against the same frame that created it. That
-      // would immediately paint a synthetic “scan” before any camera motion.
-      const surfaceMap = localizeSurfaceAnchors(previousSurfaceAnchors, currentFrame.features, SURFACE_LOCK_OPTIONS);
-      const hasCurrentSurfaceLock = surfaceMap.localizations.length > 0
-        && (evidence.usefulViewpoint || current.cameraKeyframes.length > 1);
-      const visibleSurfaceStickers = hasCurrentSurfaceLock ? surfaceMap.stickers : [];
-      const visibleSurfacePatches = [];
-      const visibleSurfaceAnchorCount = hasCurrentSurfaceLock
-        ? surfaceMap.localizations.length
-        : 0;
-
       const nextState = {
         ...current,
         directionalCoverage: nextCoverage,
@@ -793,10 +490,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         distinctViewpoints: current.distinctViewpoints + (evidence.usefulViewpoint ? 1 : 0),
         meaningfulCameraMotion: current.meaningfulCameraMotion || evidence.usefulViewpoint,
         stableFeatures: evidence.stableFeatures,
-        surfaceAnchors,
-        visibleSurfaceStickers,
-        visibleSurfacePatches,
-        visibleSurfaceAnchorCount,
         lastFrame: { ...currentFrame, viewpoint: evidence.viewpoint },
         lastViewpoint: evidence.viewpoint,
         lastEvidence: evidence,
@@ -809,8 +502,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     return () => window.clearInterval(timer);
   }, [onScanStateChange, paused, recording, resumeCamera]);
 
-  const surfaceStickers = scanState.visibleSurfaceStickers || [];
-  const surfacePatches = scanState.visibleSurfacePatches || [];
   const handleDone = async () => {
     setFinishing(true);
     const capture = await stopCaptureRecording();
@@ -823,16 +514,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   return (
     <main className="scan-screen" onPointerDown={resumeCamera}>
       <section className="scan-preview-frame" aria-label="Room camera preview">
-        <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
-        <CameraPlaceholder />
-        {/* Blue points are redrawn only from a current surface lock. When the
-            lock is lost they disappear instead of floating over a new object,
-            and they return when the saved surface is recognized again. */}
-        <SurfaceStickerCanvas
-          stickers={surfaceStickers}
-          patches={surfacePatches}
-          videoRef={videoRef}
-        />
+        {xrSession
+          ? <WebXRDepthScanner session={xrSession} onPointCloud={publishXrPointCloud} onSessionError={onXrError} />
+          : <>
+            <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
+            <CameraPlaceholder />
+          </>}
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
         <div className="camera-corners" aria-hidden="true">
           <span className="corner corner-top-left" />
@@ -982,9 +669,12 @@ function App() {
   const [buildState, setBuildState] = useState({ status: 'idle', progress: 0, jobId: null, error: null });
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraState, setCameraState] = useState('idle');
+  const [xrSession, setXrSession] = useState(null);
   const cameraRequestRef = useRef(null);
   const cameraSessionRef = useRef(0);
   const captureUrlRef = useRef(null);
+  const xrSessionRef = useRef(null);
+  const localModelUrlRef = useRef(null);
   const buildAbortRef = useRef(null);
 
   const clearCapture = useCallback(() => {
@@ -993,6 +683,13 @@ function App() {
       captureUrlRef.current = null;
     }
     setCapture(null);
+  }, []);
+
+  const clearLocalModel = useCallback(() => {
+    if (localModelUrlRef.current) {
+      URL.revokeObjectURL(localModelUrlRef.current);
+      localModelUrlRef.current = null;
+    }
   }, []);
 
   const saveCapture = useCallback((nextCapture) => {
@@ -1009,8 +706,30 @@ function App() {
 
   useEffect(() => () => {
     if (captureUrlRef.current) URL.revokeObjectURL(captureUrlRef.current);
+    if (localModelUrlRef.current) URL.revokeObjectURL(localModelUrlRef.current);
+    xrSessionRef.current?.end?.().catch?.(() => {});
     buildAbortRef.current?.abort();
   }, []);
+
+  const endXrSession = useCallback(() => {
+    const session = xrSessionRef.current;
+    xrSessionRef.current = null;
+    setXrSession(null);
+    if (session) session.end?.().catch?.(() => {});
+  }, []);
+
+  useEffect(() => {
+    xrSessionRef.current = xrSession;
+    if (!xrSession) return undefined;
+    const handleEnd = () => {
+      if (xrSessionRef.current !== xrSession) return;
+      xrSessionRef.current = null;
+      setXrSession(null);
+      setCameraState('idle');
+    };
+    xrSession.addEventListener?.('end', handleEnd);
+    return () => xrSession.removeEventListener?.('end', handleEnd);
+  }, [xrSession]);
 
   const stopCamera = useCallback(() => {
     setCameraStream((stream) => {
@@ -1084,9 +803,19 @@ function App() {
     requestCamera(cameraSessionRef.current);
   }, [requestCamera, stopCamera]);
 
+  const handleXrError = useCallback(() => {
+    const session = xrSessionRef.current;
+    xrSessionRef.current = null;
+    setXrSession(null);
+    session?.end?.().catch?.(() => {});
+    requestCamera(cameraSessionRef.current);
+  }, [requestCamera]);
+
   const cancelScan = () => {
     cameraSessionRef.current += 1;
     stopCamera();
+    endXrSession();
+    clearLocalModel();
     setCameraState('idle');
     setScreen('launch');
   };
@@ -1095,6 +824,8 @@ function App() {
     if (!isCameraScanDevice()) return;
     cameraSessionRef.current += 1;
     stopCamera();
+    endXrSession();
+    clearLocalModel();
     buildAbortRef.current?.abort();
     clearCapture();
     setReconstruction(null);
@@ -1106,17 +837,43 @@ function App() {
     setScanState(createEmptyScanState());
     setPaused(false);
     setScreen('scan');
-    requestCamera(cameraSessionRef.current);
+    const sessionId = cameraSessionRef.current;
+    if (!navigator.xr?.requestSession) {
+      requestCamera(sessionId);
+      return;
+    }
+    requestDepthSession().then((session) => {
+      if (session && cameraSessionRef.current === sessionId) {
+        xrSessionRef.current = session;
+        setXrSession(session);
+        setCameraState('live');
+        return;
+      }
+      session?.end?.().catch?.(() => {});
+      if (cameraSessionRef.current === sessionId) requestCamera(sessionId);
+    });
   };
 
   const finishScan = (keyframes, recordedCapture, scanSnapshot) => {
     cameraSessionRef.current += 1;
     stopCamera();
+    endXrSession();
     setCameraState('idle');
     setSelectedKeyframes(keyframes);
     saveCapture(recordedCapture);
     setReconstruction(null);
     setBuildState({ status: 'idle', progress: 0, jobId: null, error: null, manifest: createCaptureManifest(scanSnapshot, keyframes) });
+    const pointCloud = scanSnapshot?.webXRPointCloud || [];
+    if (pointCloud.length >= 100) {
+      clearLocalModel();
+      const blob = new Blob([serializePointCloudToPly(pointCloud)], { type: 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      localModelUrlRef.current = url;
+      setReconstruction({ modelUrl: url, modelFormat: 'ply', modelKind: 'pointcloud', pointSize: 0.025 });
+      setBuildState({ status: 'ready', progress: 100, jobId: null, error: null, manifest: createCaptureManifest(scanSnapshot, keyframes) });
+      setScreen('viewer');
+      return;
+    }
     setScreen('review');
   };
 
@@ -1124,6 +881,8 @@ function App() {
     if (!file || !file.type.startsWith('video/')) return;
     cameraSessionRef.current += 1;
     stopCamera();
+    endXrSession();
+    clearLocalModel();
     clearCapture();
     saveCapture({ blob: file, mimeType: file.type, durationMs: 0, imported: true });
     setSelectedKeyframes([]);
@@ -1215,6 +974,8 @@ function App() {
         paused={paused}
         cameraStream={cameraStream}
         cameraState={cameraState}
+        xrSession={xrSession}
+        onXrError={handleXrError}
         onPause={() => setPaused((value) => !value)}
         onDone={finishScan}
         onRetryCamera={retryCamera}
