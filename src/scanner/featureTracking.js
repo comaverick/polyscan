@@ -10,8 +10,11 @@ function luminance(red, green, blue) {
 
 function descriptorAt(data, width, height, x, y) {
   const descriptor = [];
-  for (let offsetY = -2; offsetY <= 2; offsetY += 2) {
-    for (let offsetX = -2; offsetX <= 2; offsetX += 2) {
+  // A wider normalized patch survives small camera movements and exposure
+  // changes better than the old 3x3 descriptor. It is still intentionally
+  // compact enough to compare on a phone several times per second.
+  for (let offsetY = -8; offsetY <= 8; offsetY += 4) {
+    for (let offsetX = -8; offsetX <= 8; offsetX += 4) {
       const sampleX = Math.max(0, Math.min(width - 1, x + offsetX));
       const sampleY = Math.max(0, Math.min(height - 1, y + offsetY));
       const index = (sampleY * width + sampleX) * 4;
@@ -70,7 +73,7 @@ export function extractFrameFeatures(context, width, height, maximum = 64) {
   return selected;
 }
 
-function descriptorDistance(first, second) {
+export function descriptorDistance(first, second) {
   if (!first || !second || first.length !== second.length) return Infinity;
   const sum = first.reduce((total, value, index) => total + (value - second[index]) ** 2, 0);
   return Math.sqrt(sum / first.length);
@@ -166,6 +169,8 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
       y: match.current.y,
       confidence: match.confidence,
       color: match.current.color,
+      descriptor: match.current.descriptor,
+      score: match.current.score,
     }));
   return {
     matches,

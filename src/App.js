@@ -13,7 +13,11 @@ import {
   extractFrameFeatures,
   updateFeatureTracks,
 } from './scanner/featureTracking';
-import { buildCaptureMesh } from './scanner/captureMesh';
+import {
+  appendSurfaceAnchor,
+  createSurfaceAnchor,
+  localizeSurfaceAnchors,
+} from './scanner/surfaceAnchors';
 import { getScanCoachAdvice } from './scanner/scanCoach';
 import {
   captureVideoKeyframe,
@@ -79,6 +83,9 @@ const createEmptyScanState = () => ({
   distinctViewpoints: 0,
   meaningfulCameraMotion: false,
   stableFeatures: [],
+  surfaceAnchors: [],
+  visibleSurfacePatches: [],
+  visibleSurfaceAnchorCount: 0,
   lastFrame: null,
   lastViewpoint: null,
   lastEvidence: null,
@@ -114,7 +121,7 @@ function CameraPlaceholder() {
   );
 }
 
-function CaptureMeshCanvas({ patches, mappingReady, parallax = 0 }) {
+function CaptureMeshCanvas({ patches, mappingReady, parallax = 0, videoRef }) {
   const canvasRef = useRef(null);
 
   useEffect(() => {
@@ -141,11 +148,27 @@ function CaptureMeshCanvas({ patches, mappingReady, parallax = 0 }) {
       context.fillRect(0, 0, width, height);
       if (!patches.length) return;
 
+      // The camera uses object-fit: cover. Apply the same crop here so a
+      // normalized camera point lands on the same physical detail on screen.
+      const video = videoRef?.current;
+      const sourceWidth = video?.videoWidth || width;
+      const sourceHeight = video?.videoHeight || height;
+      const coverScale = Math.max(width / sourceWidth, height / sourceHeight);
+      const drawnWidth = sourceWidth * coverScale;
+      const drawnHeight = sourceHeight * coverScale;
+      const cropX = (width - drawnWidth) / 2;
+      const cropY = (height - drawnHeight) / 2;
+      const projectPoint = (point) => ({
+        x: cropX + point.x * drawnWidth,
+        y: cropY + point.y * drawnHeight,
+      });
+
       const traceTriangle = (vertices, offset = { x: 0, y: 0 }) => {
         context.beginPath();
         vertices.forEach((vertex, index) => {
-          const x = vertex.x * width + offset.x;
-          const y = vertex.y * height + offset.y;
+          const projected = projectPoint(vertex);
+          const x = projected.x + offset.x;
+          const y = projected.y + offset.y;
           if (index === 0) context.moveTo(x, y);
           else context.lineTo(x, y);
         });
@@ -167,8 +190,9 @@ function CaptureMeshCanvas({ patches, mappingReady, parallax = 0 }) {
       context.lineJoin = 'round';
       context.lineCap = 'round';
       patches.forEach((patch) => {
-        const radialX = patch.centroid.x - 0.5;
-        const radialY = patch.centroid.y - 0.5;
+        const projectedCentroid = projectPoint(patch.centroid);
+        const radialX = projectedCentroid.x / width - 0.5;
+        const radialY = projectedCentroid.y / height - 0.5;
         const depthOffset = {
           x: radialX * parallaxDepth * (0.8 + patch.centroid.depth),
           y: radialY * parallaxDepth * 0.55 * (0.8 + patch.centroid.depth),
@@ -183,9 +207,10 @@ function CaptureMeshCanvas({ patches, mappingReady, parallax = 0 }) {
         context.stroke();
 
         patch.vertices.forEach((vertex) => {
+          const projected = projectPoint(vertex);
           context.beginPath();
-          context.moveTo(vertex.x * width, vertex.y * height);
-          context.lineTo(vertex.x * width + depthOffset.x, vertex.y * height + depthOffset.y);
+          context.moveTo(projected.x, projected.y);
+          context.lineTo(projected.x + depthOffset.x, projected.y + depthOffset.y);
           context.strokeStyle = `rgba(102, 205, 251, ${0.1 + vertex.depth * 0.16})`;
           context.lineWidth = 0.55;
           context.stroke();
@@ -199,9 +224,10 @@ function CaptureMeshCanvas({ patches, mappingReady, parallax = 0 }) {
         context.stroke();
 
         patch.vertices.forEach((vertex) => {
+          const projected = projectPoint(vertex);
           context.beginPath();
-          context.moveTo(patch.centroid.x * width, patch.centroid.y * height);
-          context.lineTo(vertex.x * width, vertex.y * height);
+          context.moveTo(projectedCentroid.x, projectedCentroid.y);
+          context.lineTo(projected.x, projected.y);
           context.strokeStyle = `rgba(194, 239, 255, ${0.07 + vertex.depth * 0.11})`;
           context.lineWidth = 0.45;
           context.stroke();
@@ -217,7 +243,7 @@ function CaptureMeshCanvas({ patches, mappingReady, parallax = 0 }) {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', draw);
     };
-  }, [mappingReady, parallax, patches]);
+  }, [mappingReady, parallax, patches, videoRef]);
 
   return <canvas ref={canvasRef} className="capture-mesh-canvas" data-mesh-patches={patches.length} aria-hidden="true" />;
 }
@@ -559,9 +585,10 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       }
       const shouldCaptureKeyframe = ((evidence.tracking && (isFirstKeyframe || evidence.usefulViewpoint)) || timedDetailedView)
         && current.cameraKeyframes.length < 96;
+      const keyframeId = `keyframe-${current.cameraKeyframes.length + 1}`;
       const nextKeyframes = shouldCaptureKeyframe
         ? [...current.cameraKeyframes, {
-          id: `keyframe-${current.cameraKeyframes.length + 1}`,
+          id: keyframeId,
           timestamp: currentFrame.timestamp,
           viewpoint: evidence.viewpoint,
           featureCount: currentFrame.features.length,
@@ -572,6 +599,16 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           capturePromise: captureVideoKeyframe(video),
         }]
         : current.cameraKeyframes;
+      const newSurfaceAnchor = shouldCaptureKeyframe
+        ? createSurfaceAnchor({
+          id: keyframeId,
+          features: currentFrame.features,
+          viewpoint: evidence.viewpoint,
+          timestamp: currentFrame.timestamp,
+        })
+        : null;
+      const surfaceAnchors = appendSurfaceAnchor(current.surfaceAnchors || [], newSurfaceAnchor);
+      const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features);
 
       const nextState = {
         ...current,
@@ -582,6 +619,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         distinctViewpoints: current.distinctViewpoints + (evidence.usefulViewpoint ? 1 : 0),
         meaningfulCameraMotion: current.meaningfulCameraMotion || evidence.usefulViewpoint,
         stableFeatures: evidence.stableFeatures,
+        surfaceAnchors,
+        visibleSurfacePatches: surfaceMap.patches,
+        visibleSurfaceAnchorCount: surfaceMap.localizations.length,
         lastFrame: { ...currentFrame, viewpoint: evidence.viewpoint },
         lastViewpoint: evidence.viewpoint,
         lastEvidence: evidence,
@@ -604,7 +644,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     meaningfulCameraMotion: scanState.meaningfulCameraMotion,
   }) || (keyframeCount >= 8 && scanState.frameCount >= 20);
   const mappingReady = keyframeCount > 0;
-  const captureMesh = buildCaptureMesh(scanState.stableFeatures);
+  const captureMesh = scanState.visibleSurfacePatches || [];
   const minimumViews = 28;
   const fullRoomReady = keyframeCount >= minimumViews && viable;
   const captureProgress = Math.min(100, Math.round((keyframeCount / minimumViews) * 100));
@@ -647,7 +687,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <section className="scan-preview-frame" aria-label="Room camera preview">
         <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
         <CameraPlaceholder />
-        <CaptureMeshCanvas patches={captureMesh} mappingReady={mappingReady} parallax={scanState.lastEvidence?.parallax || 0} />
+        <CaptureMeshCanvas patches={captureMesh} mappingReady={mappingReady} parallax={scanState.lastEvidence?.parallax || 0} videoRef={videoRef} />
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
         <div className="camera-corners" aria-hidden="true">
           <span className="corner corner-top-left" />
@@ -695,7 +735,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <div className="scan-status-row" role="status" aria-live="polite">
         <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
         <span>{statusLabel}</span>
-        <span className="scan-frame-count">{mappingReady ? `${keyframeCount} saved views${captureMesh.length ? ` / ${captureMesh.length} cleared areas` : ''}` : 'Blue = unscanned'}</span>
+        <span className="scan-frame-count">{mappingReady
+          ? scanState.visibleSurfaceAnchorCount > 0
+            ? `Surface locked / ${captureMesh.length} marked areas`
+            : `${keyframeCount} views saved / point back to restore marks`
+          : 'Blue = unscanned'}</span>
       </div>
 
       <div className="scan-bottom-ui scan-reference-bottom">
