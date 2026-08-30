@@ -10,6 +10,35 @@ function colorDistance(first = {}, second = {}) {
   return Math.sqrt(red ** 2 + green ** 2 + blue ** 2) / 441.7;
 }
 
+function convexHull(points = []) {
+  const unique = [...new Map(points
+    .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y))
+    .map((point) => [`${point.x.toFixed(5)}:${point.y.toFixed(5)}`, point])).values()]
+    .sort((first, second) => first.x - second.x || first.y - second.y);
+  if (unique.length <= 3) return unique;
+  const cross = (origin, first, second) => (
+    (first.x - origin.x) * (second.y - origin.y)
+      - (first.y - origin.y) * (second.x - origin.x)
+  );
+  const lower = [];
+  unique.forEach((point) => {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], point) <= 0) lower.pop();
+    lower.push(point);
+  });
+  const upper = [];
+  [...unique].reverse().forEach((point) => {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], point) <= 0) upper.pop();
+    upper.push(point);
+  });
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
+
+function createSurfaceFootprint(features = []) {
+  const hull = convexHull(features);
+  if (hull.length >= 3) return hull.map(({ x, y }) => ({ x, y }));
+  return [];
+}
+
 function matchAnchorFeatures(anchorFeatures = [], currentFeatures = [], options = {}) {
   const maximumDescriptorDistance = options.maximumDescriptorDistance ?? 0.7;
   const ratio = options.ratio ?? 0.84;
@@ -415,7 +444,7 @@ export function estimateSurfaceTransform(matches = [], options = {}) {
 export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp }, options = {}) {
   const maximumFeatures = options.maximumFeatures ?? 56;
   const anchorFeatures = features
-    .filter((feature) => feature.descriptor?.length)
+    .filter((feature) => feature.descriptor?.length && (feature.score || 0) >= 24)
     .slice(0, maximumFeatures)
     .map((feature, index) => ({
       ...feature,
@@ -444,6 +473,10 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
       id: tileId,
       features: tileFeatures,
       patch,
+      // Keep the visible footprint limited to the actual observed feature
+      // cluster. The old rectangular grid filled space between unrelated
+      // details and looked like a random scan on walls and furniture.
+      footprint: createSurfaceFootprint(tileFeatures),
       coverageCells: createCoverageCells(tileId, patch),
       coverageStickers: createCoverageStickers(tileId, tileFeatures),
       stickers: tileFeatures.map((feature, index) => ({
@@ -547,7 +580,8 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
   const patches = localizations.map(({ anchor, tile, transform }) => ({
     id: tile.id,
     anchorId: anchor.id,
-    vertices: (tile.patch || derivePatch(anchor.features)).map((point) => transformPoint(point, transform)),
+    vertices: (tile.footprint?.length >= 3 ? tile.footprint : (tile.patch || derivePatch(anchor.features)))
+      .map((point) => transformPoint(point, transform)),
     confidence: transform.confidence,
   })).filter((patch) => patch.vertices.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
 

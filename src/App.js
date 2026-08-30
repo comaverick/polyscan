@@ -281,33 +281,11 @@ function SurfaceStickerCanvas({ stickers, patches = [], videoRef }) {
         y: cropY + point.y * drawnHeight,
       });
 
-      const projectedPatches = activePatchesRef.current
-        .map((patch) => patch.vertices.map(projectPoint))
-        .filter((vertices) => vertices.length >= 4 && vertices.every((point) => (
-          Number.isFinite(point.x) && Number.isFinite(point.y)
-        )));
-
-      // The filled region is the scan result: unscanned camera pixels remain
-      // natural, while this surface-tied blue mask returns when the same wall
-      // is recognized again.
-      context.save();
-      context.fillStyle = 'rgba(64, 145, 255, .34)';
-      context.strokeStyle = 'rgba(196, 231, 255, .52)';
-      context.lineWidth = 1;
-      projectedPatches.forEach((vertices) => {
-        context.beginPath();
-        context.moveTo(vertices[0].x, vertices[0].y);
-        vertices.slice(1).forEach((point) => context.lineTo(point.x, point.y));
-        context.closePath();
-        context.fill();
-        context.stroke();
-      });
-      context.restore();
-
       if (!visibleStickers.length) return;
 
-      // Small blue squares remain as precise lock guides on top of the broad
-      // surface mask, making it easy to see what is driving the attachment.
+      // These points are the only live “scanned” indication. Every point is a
+      // real image feature that was matched back to a saved view, so the UI
+      // never fills a guessed rectangle or connects unrelated objects.
       context.save();
       context.lineWidth = 1;
       visibleStickers.forEach((sticker) => {
@@ -800,37 +778,18 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           timestamp: currentFrame.timestamp,
         })
         : null;
-      const surfaceAnchors = appendSurfaceAnchor(current.surfaceAnchors || [], newSurfaceAnchor, MAX_SURFACE_ANCHORS);
-      const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features, SURFACE_LOCK_OPTIONS);
-      const hasCurrentSurfaceLock = surfaceMap.localizations.length > 0 || Boolean(newSurfaceAnchor);
-      const currentSurfaceCoverage = surfaceMap.coverageCells?.length
-        ? surfaceMap.coverageCells
-        : surfaceMap.patches;
-      const newSurfaceCoverage = newSurfaceAnchor?.coverageCells?.length
-        ? newSurfaceAnchor.coverageCells
-        : (newSurfaceAnchor?.patches || []);
-      const visibleSurfaceStickers = hasCurrentSurfaceLock && newSurfaceAnchor
-        && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
-        ? [
-          ...surfaceMap.stickers,
-          ...newSurfaceAnchor.stickers,
-        ]
-        : hasCurrentSurfaceLock
-          ? surfaceMap.stickers
-          : (current.visibleSurfaceStickers || []);
-      const visibleSurfacePatches = hasCurrentSurfaceLock && newSurfaceAnchor
-        && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
-        ? [
-          ...currentSurfaceCoverage,
-          ...newSurfaceCoverage,
-        ]
-        : hasCurrentSurfaceLock
-          ? currentSurfaceCoverage
-          : (current.visibleSurfacePatches || []);
+      const previousSurfaceAnchors = current.surfaceAnchors || [];
+      const surfaceAnchors = appendSurfaceAnchor(previousSurfaceAnchors, newSurfaceAnchor, MAX_SURFACE_ANCHORS);
+      // Never localize an anchor against the same frame that created it. That
+      // would immediately paint a synthetic “scan” before any camera motion.
+      const surfaceMap = localizeSurfaceAnchors(previousSurfaceAnchors, currentFrame.features, SURFACE_LOCK_OPTIONS);
+      const hasCurrentSurfaceLock = surfaceMap.localizations.length > 0
+        && (evidence.usefulViewpoint || current.cameraKeyframes.length > 1);
+      const visibleSurfaceStickers = hasCurrentSurfaceLock ? surfaceMap.stickers : [];
+      const visibleSurfacePatches = [];
       const visibleSurfaceAnchorCount = hasCurrentSurfaceLock
         ? surfaceMap.localizations.length
-          + (newSurfaceAnchor && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id) ? 1 : 0)
-        : (current.visibleSurfaceAnchorCount || 0);
+        : 0;
 
       const nextState = {
         ...current,
@@ -920,9 +879,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <section className="scan-preview-frame" aria-label="Room camera preview">
         <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
         <CameraPlaceholder />
-        {/* Keep the last recognized surface visible through a brief tracking
-            dropout. Clearing it on one blurry frame made a wall look like it
-            had been unscanned again even though the lock was still valid. */}
+        {/* Blue points are redrawn only from a current surface lock. When the
+            lock is lost they disappear instead of floating over a new object,
+            and they return when the saved surface is recognized again. */}
         <SurfaceStickerCanvas
           stickers={surfaceStickers}
           patches={surfacePatches}
@@ -956,7 +915,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       {modeOpen && (
         <div className="scan-tip-card" role="status">
           <strong>Scan the room slowly</strong>
-          <span>Natural-color areas are unscanned. Blue squares mark surfaces already locked.</span>
+          <span>Natural-color areas are unscanned. Blue points mark details confirmed across camera views.</span>
         </div>
       )}
 
@@ -978,10 +937,10 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         <span className="scan-frame-count">{mappingReady
           ? scanState.visibleSurfaceAnchorCount > 0
             ? trackingState === 'tracking' && scanState.visibleSurfaceAnchorCount > 0
-              ? `Surface locked / ${surfaceStickers.length} scan marks`
+              ? `Surface locked / ${surfaceStickers.length} confirmed points`
               : 'Reacquiring surface lock'
             : `${keyframeCount} views saved / point back to restore marks`
-          : 'Natural color = unscanned / blue squares = scanned'}</span>
+          : 'Natural color = unscanned / blue points = confirmed'}</span>
       </div>
 
       <div className="scan-bottom-ui scan-reference-bottom">
