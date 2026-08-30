@@ -140,7 +140,7 @@ function CameraPlaceholder() {
   );
 }
 
-function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
+function SurfaceStickerCanvas({ stickers, videoRef }) {
   const canvasRef = useRef(null);
   const activeStickersRef = useRef([]);
   const lastExternalLockRef = useRef(0);
@@ -204,8 +204,6 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
       context.clearRect(0, 0, width, height);
 
-      context.fillStyle = mappingReady ? 'rgba(24, 81, 210, .5)' : 'rgba(24, 81, 210, .62)';
-      context.fillRect(0, 0, width, height);
       if (!visibleStickers.length) return;
 
       const video = trackedVideo;
@@ -221,24 +219,16 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
         y: cropY + point.y * drawnHeight,
       });
 
+      // Leave unscanned areas in their natural camera color. A translucent
+      // blue square is the scan confirmation that sticks to a locked surface.
       context.save();
-      context.globalCompositeOperation = 'destination-out';
-      visibleStickers.forEach((sticker) => {
-        const point = projectPoint(sticker);
-        const side = Math.max(8, Math.min(16, sticker.radius * Math.min(drawnWidth, drawnHeight) * 0.42));
-        context.fillStyle = 'rgba(0, 0, 0, .98)';
-        context.fillRect(point.x - side / 2, point.y - side / 2, side, side);
-      });
-      context.restore();
-
-      // A small square confirms the exact tracked feature without implying that
-      // a rough 2D outline is a full 3D surface.
-      context.save();
-      context.strokeStyle = 'rgba(211, 249, 255, .24)';
+      context.fillStyle = 'rgba(64, 145, 255, .42)';
+      context.strokeStyle = 'rgba(196, 231, 255, .82)';
       context.lineWidth = 1;
       visibleStickers.forEach((sticker) => {
         const point = projectPoint(sticker);
         const side = Math.max(8, Math.min(16, sticker.radius * Math.min(drawnWidth, drawnHeight) * 0.42));
+        context.fillRect(point.x - side / 2, point.y - side / 2, side, side);
         context.strokeRect(point.x - side / 2, point.y - side / 2, side, side);
       });
       context.restore();
@@ -328,7 +318,7 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
       resizeObserver?.disconnect();
       window.removeEventListener('resize', handleResize);
     };
-  }, [mappingReady, videoRef]);
+  }, [videoRef]);
 
   return (
     <canvas
@@ -810,7 +800,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         <CameraPlaceholder />
         <SurfaceStickerCanvas
           stickers={trackingState === 'tracking' ? surfaceStickers : []}
-          mappingReady={mappingReady}
           videoRef={videoRef}
         />
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
@@ -841,7 +830,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       {modeOpen && (
         <div className="scan-tip-card" role="status">
           <strong>Scan the room slowly</strong>
-          <span>The small scan marks should remain attached to edges and details as you move.</span>
+          <span>Natural-color areas are unscanned. Blue squares mark surfaces already locked.</span>
         </div>
       )}
 
@@ -866,7 +855,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
               ? `Surface locked / ${surfaceStickers.length} scan marks`
               : 'Reacquiring surface lock'
             : `${keyframeCount} views saved / point back to restore marks`
-          : 'Blue = unscanned'}</span>
+          : 'Natural color = unscanned / blue squares = scanned'}</span>
       </div>
 
       <div className="scan-bottom-ui scan-reference-bottom">
