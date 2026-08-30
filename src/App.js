@@ -712,8 +712,13 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features, SURFACE_LOCK_OPTIONS);
       const visibleSurfaceStickers = newSurfaceAnchor
         && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
-        ? [...surfaceMap.stickers, ...newSurfaceAnchor.stickers]
-        : surfaceMap.stickers;
+        ? [
+          ...surfaceMap.stickers,
+          ...(surfaceMap.coverageStickers || []),
+          ...newSurfaceAnchor.stickers,
+          ...(newSurfaceAnchor.coverageStickers || []),
+        ]
+        : [...surfaceMap.stickers, ...(surfaceMap.coverageStickers || [])];
       const visibleSurfaceAnchorCount = surfaceMap.localizations.length
         + (newSurfaceAnchor && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id) ? 1 : 0);
 

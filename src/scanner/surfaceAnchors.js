@@ -191,6 +191,53 @@ function inliersForTransform(matches, transform, threshold) {
   });
 }
 
+function createCoverageStickers(tileId, tileFeatures = []) {
+  if (tileFeatures.length < 4) return [];
+
+  const minFeatureX = Math.min(...tileFeatures.map((feature) => feature.x));
+  const maxFeatureX = Math.max(...tileFeatures.map((feature) => feature.x));
+  const minFeatureY = Math.min(...tileFeatures.map((feature) => feature.y));
+  const maxFeatureY = Math.max(...tileFeatures.map((feature) => feature.y));
+  const centerX = (minFeatureX + maxFeatureX) / 2;
+  const centerY = (minFeatureY + maxFeatureY) / 2;
+  // Feature points are usually concentrated on edges of a wall. Expand their
+  // envelope slightly so the UI can show the surrounding wall area without
+  // pretending that an untracked, full-screen plane has been reconstructed.
+  const halfWidth = Math.min(0.23, Math.max(0.08, (maxFeatureX - minFeatureX) / 2 + 0.06));
+  const halfHeight = Math.min(0.23, Math.max(0.08, (maxFeatureY - minFeatureY) / 2 + 0.06));
+  const minX = clamp(centerX - halfWidth, 0.02, 0.9);
+  const maxX = clamp(centerX + halfWidth, minX + 0.08, 0.98);
+  const minY = clamp(centerY - halfHeight, 0.02, 0.9);
+  const maxY = clamp(centerY + halfHeight, minY + 0.08, 0.98);
+  const columns = Math.max(2, Math.min(4, Math.ceil((maxX - minX) / 0.12)));
+  const rows = Math.max(2, Math.min(4, Math.ceil((maxY - minY) / 0.12)));
+  const candidates = [];
+
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      candidates.push({
+        x: minX + ((column + 0.5) / columns) * (maxX - minX),
+        y: minY + ((row + 0.5) / rows) * (maxY - minY),
+      });
+    }
+  }
+
+  const awayFromFeatures = candidates.filter((candidate) => tileFeatures.every((feature) => (
+    Math.hypot(feature.x - candidate.x, feature.y - candidate.y) >= 0.045
+  )));
+  const points = (awayFromFeatures.length >= 4 ? awayFromFeatures : candidates).slice(0, 12);
+  return points.map((point, index) => ({
+    id: `${tileId}-wall-${index}`,
+    anchorId: tileId,
+    x: point.x,
+    y: point.y,
+    radius: 0.023,
+    confidence: 0.48,
+    trackable: false,
+    kind: 'surface-coverage',
+  }));
+}
+
 export function estimateSurfaceTransform(matches = [], options = {}) {
   const threshold = options.inlierThreshold ?? 0.048;
   const minimumInliers = options.minimumInliers ?? 4;
@@ -256,6 +303,7 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
       const maxY = Math.min(1, centerY + halfHeight);
       return [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }];
     })(),
+    coverageStickers: createCoverageStickers(tileId, tileFeatures),
     stickers: tileFeatures.map((feature, index) => ({
       id: `${tileId}-coverage-${index}`,
       anchorId: tileId,
@@ -283,6 +331,7 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
     features: anchorFeatures,
     tiles,
     stickers: tiles.flatMap((tile) => tile.stickers),
+    coverageStickers: tiles.flatMap((tile) => tile.coverageStickers || []),
   };
 }
 
@@ -323,6 +372,21 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
   })).filter((sticker) => sticker.x > -0.12 && sticker.x < 1.12
     && sticker.y > -0.12 && sticker.y < 1.12);
 
+  const coverageStickers = localizations.flatMap(({ tile, transform }) => (tile.coverageStickers || []).map((sticker) => {
+    const position = transformPoint(sticker, transform);
+    return {
+      ...sticker,
+      anchorId: tile.id,
+      x: position.x,
+      y: position.y,
+      radius: sticker.radius * Math.sqrt(
+        Math.hypot(transform.a, transform.c) * Math.hypot(transform.b, transform.d),
+      ),
+      confidence: clamp(sticker.confidence * (0.58 + transform.confidence * 0.42)),
+    };
+  })).filter((sticker) => sticker.x > -0.12 && sticker.x < 1.12
+    && sticker.y > -0.12 && sticker.y < 1.12);
+
   const patches = localizations.map(({ anchor, tile, transform }) => ({
     id: tile.id,
     anchorId: anchor.id,
@@ -330,7 +394,7 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
     confidence: transform.confidence,
   })).filter((patch) => patch.vertices.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
 
-  return { stickers, patches, localizations };
+  return { stickers, coverageStickers, patches, localizations };
 }
 
 function derivePatch(features = []) {

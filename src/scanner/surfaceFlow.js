@@ -79,7 +79,11 @@ function median(values) {
 function trackStickerGroup(previous, current, width, height, stickers, options) {
   const minimumCorrelation = options.minimumCorrelation ?? 0.7;
   const maximumFlowResidual = options.maximumFlowResidual ?? 3.8;
-  const controlStickers = [...stickers]
+  // Coverage squares are deliberately synthetic: they show the wall area
+  // around a real lock, but their flat pixels are not reliable optical-flow
+  // controls. Always prefer the original image features for motion estimation.
+  const trackableStickers = stickers.filter((sticker) => sticker.trackable !== false);
+  const controlStickers = [...(trackableStickers.length ? trackableStickers : stickers)]
     .sort((first, second) => (second.confidence || 0) - (first.confidence || 0))
     .slice(0, options.maximumControlPoints ?? 18);
   const candidates = controlStickers.map((sticker) => {
