@@ -178,16 +178,37 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
       confidence: clamp(0.58 + Math.min(feature.score || 0, 180) / 600),
     }));
   if (anchorFeatures.length < 6) return null;
-  const stickers = anchorFeatures.map((feature, index) => ({
-    id: `${id}-sticker-${index}`,
-    anchorId: id,
-    x: feature.x,
-    y: feature.y,
-    radius: 0.022 + clamp((feature.score || 0) / 260) * 0.014,
-    confidence: feature.confidence,
-    seed: (index * 17 + id.length * 11) % 31,
-  }));
-  return { id, timestamp, viewpoint, features: anchorFeatures, stickers };
+  const createTile = (tileId, tileFeatures) => ({
+    id: tileId,
+    features: tileFeatures,
+    stickers: tileFeatures.map((feature, index) => ({
+      id: `${tileId}-coverage-${index}`,
+      anchorId: tileId,
+      x: feature.x,
+      y: feature.y,
+      radius: 0.04 + clamp((feature.score || 0) / 260) * 0.022,
+      confidence: feature.confidence,
+    })),
+  });
+  const tileBuckets = new Map();
+  anchorFeatures.forEach((feature) => {
+    const tileX = Math.min(1, Math.floor(feature.x * 2));
+    const tileY = Math.min(1, Math.floor(feature.y * 2));
+    const tileId = `${id}-tile-${tileX}-${tileY}`;
+    tileBuckets.set(tileId, [...(tileBuckets.get(tileId) || []), feature]);
+  });
+  let tiles = [...tileBuckets.entries()]
+    .filter(([, tileFeatures]) => tileFeatures.length >= 4)
+    .map(([tileId, tileFeatures]) => createTile(tileId, tileFeatures));
+  if (!tiles.length) tiles = [createTile(`${id}-tile-all`, anchorFeatures)];
+  return {
+    id,
+    timestamp,
+    viewpoint,
+    features: anchorFeatures,
+    tiles,
+    stickers: tiles.flatMap((tile) => tile.stickers),
+  };
 }
 
 export function appendSurfaceAnchor(anchors = [], anchor, maximum = DEFAULT_MAX_ANCHORS) {
@@ -196,22 +217,26 @@ export function appendSurfaceAnchor(anchors = [], anchor, maximum = DEFAULT_MAX_
 }
 
 export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], options = {}) {
-  const maximumVisibleAnchors = options.maximumVisibleAnchors ?? 3;
-  const localizations = anchors.map((anchor) => {
-    const matches = matchAnchorFeatures(anchor.features, currentFeatures, options);
+  const maximumVisibleAnchors = options.maximumVisibleAnchors ?? 7;
+  const localizations = anchors.flatMap((anchor) => (anchor.tiles || [{
+    id: `${anchor.id}-legacy`,
+    features: anchor.features,
+    stickers: anchor.stickers,
+  }]).map((tile) => {
+    const matches = matchAnchorFeatures(tile.features, currentFeatures, options);
     const transform = estimateSurfaceTransform(matches, options);
     if (!transform) return null;
-    return { anchor, transform, matchCount: matches.length };
-  }).filter(Boolean)
+    return { anchor, tile, transform, matchCount: matches.length };
+  })).filter(Boolean)
     .sort((first, second) => second.transform.confidence - first.transform.confidence
       || second.transform.inlierCount - first.transform.inlierCount)
     .slice(0, maximumVisibleAnchors);
 
-  const stickers = localizations.flatMap(({ anchor, transform }) => anchor.stickers.map((sticker) => {
+  const stickers = localizations.flatMap(({ tile, transform }) => tile.stickers.map((sticker) => {
     const position = transformPoint(sticker, transform);
     return {
       ...sticker,
-      anchorId: anchor.id,
+      anchorId: tile.id,
       x: position.x,
       y: position.y,
       radius: sticker.radius * Math.sqrt(

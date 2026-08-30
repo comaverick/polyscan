@@ -57,7 +57,7 @@ test('creates scan stickers without requiring polygon geometry', () => {
 
   expect(anchor).not.toBeNull();
   expect(anchor.stickers).toHaveLength(6);
-  expect(anchor.stickers.every((sticker) => sticker.anchorId === 'chair')).toBe(true);
+  expect(anchor.stickers.every((sticker) => sticker.anchorId.startsWith('chair-tile-'))).toBe(true);
 });
 
 test('reprojects saved stickers when the same surface returns to view', () => {

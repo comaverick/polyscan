@@ -22,6 +22,11 @@ import {
   grayscaleFromImageData,
   trackSurfaceStickerGroups,
 } from './scanner/surfaceFlow';
+import {
+  createVisionFrame,
+  loadVisionRuntime,
+  trackPointsWithVision,
+} from './scanner/visionRuntime';
 import { getScanCoachAdvice } from './scanner/scanCoach';
 import {
   captureVideoKeyframe,
@@ -164,6 +169,13 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
     let animationHandle = null;
     let videoFrameHandle = null;
     let cancelled = false;
+    let vision = null;
+    let previousVisionFrame = null;
+    loadVisionRuntime().then((runtime) => {
+      if (!cancelled) vision = runtime;
+    }).catch(() => {
+      // The lightweight fallback remains available if WebAssembly cannot load.
+    });
 
     const draw = (visibleStickers = activeStickersRef.current) => {
       const rect = canvas.getBoundingClientRect();
@@ -211,33 +223,6 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
         context.fill();
       });
       context.restore();
-
-      context.lineJoin = 'round';
-      context.lineCap = 'round';
-      visibleStickers.forEach((sticker) => {
-        const point = projectPoint(sticker);
-        const radius = Math.max(8, sticker.radius * Math.min(drawnWidth, drawnHeight));
-        const confidence = sticker.confidence || 0.5;
-        context.beginPath();
-        context.arc(point.x, point.y, radius * 0.48, -0.8, 2.6);
-        context.strokeStyle = `rgba(205, 244, 255, ${0.18 + confidence * 0.42})`;
-        context.lineWidth = 0.8;
-        context.stroke();
-        for (let index = 0; index < 3; index += 1) {
-          const angle = ((sticker.seed || 0) * 0.37 + index * 2.1) % (Math.PI * 2);
-          const distance = radius * (0.3 + index * 0.12);
-          context.beginPath();
-          context.arc(
-            point.x + Math.cos(angle) * distance,
-            point.y + Math.sin(angle) * distance,
-            0.8 + index * 0.18,
-            0,
-            Math.PI * 2,
-          );
-          context.fillStyle = `rgba(167, 230, 255, ${0.18 + confidence * 0.38})`;
-          context.fill();
-        }
-      });
     };
 
     const processFrame = (timestamp) => {
@@ -247,11 +232,35 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
         lastProcessedAt = timestamp;
         try {
           trackingContext.drawImage(video, 0, 0, trackingWidth, trackingHeight);
-          const currentGray = grayscaleFromImageData(
-            trackingContext.getImageData(0, 0, trackingWidth, trackingHeight),
-          );
+          const imageData = trackingContext.getImageData(0, 0, trackingWidth, trackingHeight);
+          const currentGray = grayscaleFromImageData(imageData);
           let acceptCurrentReference = true;
-          if (previousGray && activeStickersRef.current.length) {
+          if (vision) {
+            if (previousVisionFrame && activeStickersRef.current.length) {
+              const flow = trackPointsWithVision(
+                vision,
+                previousVisionFrame,
+                imageData,
+                trackingWidth,
+                trackingHeight,
+                activeStickersRef.current,
+              );
+              if (flow?.points.length >= 3) {
+                previousVisionFrame.delete();
+                previousVisionFrame = flow.currentGray;
+                activeStickersRef.current = flow.points;
+                lastGoodFlowAt = timestamp;
+              } else {
+                flow?.currentGray?.delete();
+                if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
+                  activeStickersRef.current = [];
+                }
+              }
+            } else {
+              previousVisionFrame?.delete();
+              previousVisionFrame = createVisionFrame(vision, imageData);
+            }
+          } else if (previousGray && activeStickersRef.current.length) {
             const flow = trackSurfaceStickerGroups(
               previousGray,
               currentGray,
@@ -273,6 +282,8 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
           if (acceptCurrentReference) previousGray = currentGray;
         } catch {
           previousGray = null;
+          previousVisionFrame?.delete();
+          previousVisionFrame = null;
         }
       }
       draw();
@@ -293,6 +304,7 @@ function SurfaceStickerCanvas({ stickers, mappingReady, videoRef }) {
       cancelled = true;
       if (animationHandle != null) window.cancelAnimationFrame(animationHandle);
       if (videoFrameHandle != null && trackedVideo?.cancelVideoFrameCallback) trackedVideo.cancelVideoFrameCallback(videoFrameHandle);
+      previousVisionFrame?.delete();
       resizeObserver?.disconnect();
       window.removeEventListener('resize', handleResize);
     };
