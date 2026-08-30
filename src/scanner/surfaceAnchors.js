@@ -209,8 +209,11 @@ function createCoverageStickers(tileId, tileFeatures = []) {
   const maxX = clamp(centerX + halfWidth, minX + 0.08, 0.98);
   const minY = clamp(centerY - halfHeight, 0.02, 0.9);
   const maxY = clamp(centerY + halfHeight, minY + 0.08, 0.98);
-  const columns = Math.max(2, Math.min(4, Math.ceil((maxX - minX) / 0.12)));
-  const rows = Math.max(2, Math.min(4, Math.ceil((maxY - minY) / 0.12)));
+  // Use enough small cells that a locked wall reads as covered, rather than as
+  // a handful of unrelated dots. The grid is still bounded to keep mobile
+  // canvas work predictable.
+  const columns = Math.max(4, Math.min(6, Math.ceil((maxX - minX) / 0.075)));
+  const rows = Math.max(4, Math.min(6, Math.ceil((maxY - minY) / 0.075)));
   const candidates = [];
 
   for (let row = 0; row < rows; row += 1) {
@@ -225,13 +228,13 @@ function createCoverageStickers(tileId, tileFeatures = []) {
   const awayFromFeatures = candidates.filter((candidate) => tileFeatures.every((feature) => (
     Math.hypot(feature.x - candidate.x, feature.y - candidate.y) >= 0.045
   )));
-  const points = (awayFromFeatures.length >= 4 ? awayFromFeatures : candidates).slice(0, 12);
+  const points = (awayFromFeatures.length >= candidates.length * 0.55 ? awayFromFeatures : candidates).slice(0, 36);
   return points.map((point, index) => ({
     id: `${tileId}-wall-${index}`,
     anchorId: tileId,
     x: point.x,
     y: point.y,
-    radius: 0.023,
+    radius: 0.032,
     confidence: 0.48,
     trackable: false,
     kind: 'surface-coverage',

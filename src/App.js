@@ -222,12 +222,13 @@ function SurfaceStickerCanvas({ stickers, videoRef }) {
       // Leave unscanned areas in their natural camera color. A translucent
       // blue square is the scan confirmation that sticks to a locked surface.
       context.save();
-      context.fillStyle = 'rgba(64, 145, 255, .42)';
-      context.strokeStyle = 'rgba(196, 231, 255, .82)';
       context.lineWidth = 1;
       visibleStickers.forEach((sticker) => {
         const point = projectPoint(sticker);
         const side = Math.max(8, Math.min(16, sticker.radius * Math.min(drawnWidth, drawnHeight) * 0.42));
+        const isCoverage = sticker.kind === 'surface-coverage';
+        context.fillStyle = isCoverage ? 'rgba(64, 145, 255, .3)' : 'rgba(64, 145, 255, .56)';
+        context.strokeStyle = isCoverage ? 'rgba(196, 231, 255, .54)' : 'rgba(196, 231, 255, .88)';
         context.fillRect(point.x - side / 2, point.y - side / 2, side, side);
         context.strokeRect(point.x - side / 2, point.y - side / 2, side, side);
       });
