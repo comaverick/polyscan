@@ -47,6 +47,10 @@ import RoomModelViewer from './viewer/RoomModelViewer';
 const CAPTURE_INTERVAL_MS = 520;
 const ANALYSIS_WIDTH = 320;
 const ANALYSIS_HEIGHT = 240;
+const SURFACE_LOCK_OPTIONS = Object.freeze({
+  minimumTransformConfidence: 0.44,
+  inlierThreshold: 0.04,
+});
 
 function getReconstructionViewerUrl(result) {
   const value = result?.viewerUrl || result?.viewer?.url;
@@ -171,7 +175,10 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
   const lastExternalLockRef = useRef(0);
 
   useEffect(() => {
-    if (!stickers.length) return;
+    if (!stickers.length) {
+      activeStickersRef.current = [];
+      return;
+    }
     const activeById = new Map(activeStickersRef.current.map((sticker) => [sticker.id, sticker]));
     activeStickersRef.current = stickers.map((sticker) => {
       const active = activeById.get(sticker.id);
@@ -187,7 +194,10 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
   }, [stickers]);
 
   useEffect(() => {
-    if (!patches.length) return;
+    if (!patches.length) {
+      activePatchesRef.current = [];
+      return;
+    }
     const activeById = new Map(activePatchesRef.current.map((patch) => [patch.id, patch]));
     activePatchesRef.current = patches.map((patch) => {
       const active = activeById.get(patch.id);
@@ -282,8 +292,8 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
       // Keep the confirmation subtle: it is an edge on the real surface, not a
       // floating 3D object that hides the camera image underneath it.
       context.save();
-      context.strokeStyle = 'rgba(211, 249, 255, .54)';
-      context.lineWidth = Math.max(1, Math.min(width, height) * 0.003);
+      context.strokeStyle = 'rgba(211, 249, 255, .24)';
+      context.lineWidth = Math.max(1, Math.min(width, height) * 0.0012);
       context.lineJoin = 'round';
       projectedPatches.forEach((vertices) => {
         context.beginPath();
@@ -326,6 +336,7 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
                 flow?.currentGray?.delete();
                 if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
                   activeStickersRef.current = [];
+                  activePatchesRef.current = [];
                 }
               }
             } else {
@@ -347,6 +358,7 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
               lastGoodFlowAt = timestamp;
             } else if (timestamp - Math.max(lastGoodFlowAt, lastExternalLockRef.current) > 650) {
               activeStickersRef.current = [];
+              activePatchesRef.current = [];
             } else {
               // Keep the last sharp reference through a brief blur or autofocus
               // pulse so the next good frame can recover the same surface.
@@ -358,6 +370,8 @@ function SurfaceStickerCanvas({ stickers, patches = [], mappingReady, videoRef }
           previousGray = null;
           previousVisionFrame?.delete();
           previousVisionFrame = null;
+          activeStickersRef.current = [];
+          activePatchesRef.current = [];
         }
       }
       draw();
@@ -746,7 +760,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           capturePromise: captureVideoKeyframe(video),
         }]
         : current.cameraKeyframes;
-      const existingSurfaceMap = localizeSurfaceAnchors(current.surfaceAnchors || [], currentFrame.features);
+      const existingSurfaceMap = localizeSurfaceAnchors(
+        current.surfaceAnchors || [],
+        currentFrame.features,
+        SURFACE_LOCK_OPTIONS,
+      );
       const strongestExistingLock = existingSurfaceMap.localizations[0]?.transform;
       const shouldCreateSurfaceAnchor = shouldCaptureKeyframe
         && (!strongestExistingLock || strongestExistingLock.inlierCount < 10);
@@ -759,7 +777,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         })
         : null;
       const surfaceAnchors = appendSurfaceAnchor(current.surfaceAnchors || [], newSurfaceAnchor);
-      const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features);
+      const surfaceMap = localizeSurfaceAnchors(surfaceAnchors, currentFrame.features, SURFACE_LOCK_OPTIONS);
       const visibleSurfaceStickers = newSurfaceAnchor
         && !surfaceMap.localizations.some(({ anchor }) => anchor.id === newSurfaceAnchor.id)
         ? [...surfaceMap.stickers, ...newSurfaceAnchor.stickers]
@@ -856,7 +874,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <section className="scan-preview-frame" aria-label="Room camera preview">
         <video ref={videoRef} className="camera-video" autoPlay playsInline muted onLoadedMetadata={resumeCamera} onCanPlay={resumeCamera} aria-label="Live room camera" />
         <CameraPlaceholder />
-        <SurfaceStickerCanvas stickers={surfaceStickers} patches={surfacePatches} mappingReady={mappingReady} videoRef={videoRef} />
+        <SurfaceStickerCanvas
+          stickers={trackingState === 'tracking' ? surfaceStickers : []}
+          patches={trackingState === 'tracking' ? surfacePatches : []}
+          mappingReady={mappingReady}
+          videoRef={videoRef}
+        />
         <canvas ref={analysisCanvasRef} className="analysis-canvas" aria-hidden="true" />
         <div className="camera-corners" aria-hidden="true">
           <span className="corner corner-top-left" />
@@ -906,7 +929,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         <span>{statusLabel}</span>
         <span className="scan-frame-count">{mappingReady
           ? scanState.visibleSurfaceAnchorCount > 0
-            ? `Surface locked / ${surfaceStickers.length} scan marks`
+            ? trackingState === 'tracking' && scanState.visibleSurfaceAnchorCount > 0
+              ? `Surface locked / ${surfaceStickers.length} scan marks`
+              : 'Reacquiring surface lock'
             : `${keyframeCount} views saved / point back to restore marks`
           : 'Blue = unscanned'}</span>
       </div>

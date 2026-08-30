@@ -241,11 +241,19 @@ export function createSurfaceAnchor({ id, features = [], viewpoint, timestamp },
     id: tileId,
     features: tileFeatures,
     patch: (() => {
-      const padding = 0.045;
-      const minX = Math.max(0, Math.min(...tileFeatures.map((feature) => feature.x)) - padding);
-      const maxX = Math.min(1, Math.max(...tileFeatures.map((feature) => feature.x)) + padding);
-      const minY = Math.max(0, Math.min(...tileFeatures.map((feature) => feature.y)) - padding);
-      const maxY = Math.min(1, Math.max(...tileFeatures.map((feature) => feature.y)) + padding);
+      const padding = 0.035;
+      const minFeatureX = Math.min(...tileFeatures.map((feature) => feature.x));
+      const maxFeatureX = Math.max(...tileFeatures.map((feature) => feature.x));
+      const minFeatureY = Math.min(...tileFeatures.map((feature) => feature.y));
+      const maxFeatureY = Math.max(...tileFeatures.map((feature) => feature.y));
+      const centerX = (minFeatureX + maxFeatureX) / 2;
+      const centerY = (minFeatureY + maxFeatureY) / 2;
+      const halfWidth = Math.min(0.17, (maxFeatureX - minFeatureX) / 2 + padding);
+      const halfHeight = Math.min(0.17, (maxFeatureY - minFeatureY) / 2 + padding);
+      const minX = Math.max(0, centerX - halfWidth);
+      const maxX = Math.min(1, centerX + halfWidth);
+      const minY = Math.max(0, centerY - halfHeight);
+      const maxY = Math.min(1, centerY + halfHeight);
       return [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }];
     })(),
     stickers: tileFeatures.map((feature, index) => ({
@@ -285,6 +293,7 @@ export function appendSurfaceAnchor(anchors = [], anchor, maximum = DEFAULT_MAX_
 
 export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], options = {}) {
   const maximumVisibleAnchors = options.maximumVisibleAnchors ?? 7;
+  const minimumTransformConfidence = options.minimumTransformConfidence ?? 0;
   const localizations = anchors.flatMap((anchor) => (anchor.tiles || [{
     id: `${anchor.id}-legacy`,
     features: anchor.features,
@@ -292,7 +301,7 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
   }]).map((tile) => {
     const matches = matchAnchorFeatures(tile.features, currentFeatures, options);
     const transform = estimateSurfaceTransform(matches, options);
-    if (!transform) return null;
+    if (!transform || transform.confidence < minimumTransformConfidence) return null;
     return { anchor, tile, transform, matchCount: matches.length };
   })).filter(Boolean)
     .sort((first, second) => second.transform.confidence - first.transform.confidence
@@ -326,10 +335,18 @@ export function localizeSurfaceAnchors(anchors = [], currentFeatures = [], optio
 
 function derivePatch(features = []) {
   if (!features.length) return [];
-  const padding = 0.045;
-  const minX = Math.max(0, Math.min(...features.map((feature) => feature.x)) - padding);
-  const maxX = Math.min(1, Math.max(...features.map((feature) => feature.x)) + padding);
-  const minY = Math.max(0, Math.min(...features.map((feature) => feature.y)) - padding);
-  const maxY = Math.min(1, Math.max(...features.map((feature) => feature.y)) + padding);
+  const padding = 0.035;
+  const minFeatureX = Math.min(...features.map((feature) => feature.x));
+  const maxFeatureX = Math.max(...features.map((feature) => feature.x));
+  const minFeatureY = Math.min(...features.map((feature) => feature.y));
+  const maxFeatureY = Math.max(...features.map((feature) => feature.y));
+  const centerX = (minFeatureX + maxFeatureX) / 2;
+  const centerY = (minFeatureY + maxFeatureY) / 2;
+  const halfWidth = Math.min(0.17, (maxFeatureX - minFeatureX) / 2 + padding);
+  const halfHeight = Math.min(0.17, (maxFeatureY - minFeatureY) / 2 + padding);
+  const minX = Math.max(0, centerX - halfWidth);
+  const maxX = Math.min(1, centerX + halfWidth);
+  const minY = Math.max(0, centerY - halfHeight);
+  const maxY = Math.min(1, centerY + halfHeight);
   return [{ x: minX, y: minY }, { x: maxX, y: minY }, { x: maxX, y: maxY }, { x: minX, y: maxY }];
 }
