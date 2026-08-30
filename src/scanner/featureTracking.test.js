@@ -45,11 +45,16 @@ test('finds repeatable details after a camera-like image translation', () => {
 });
 
 test('accumulates slow motion from the last saved viewpoint', () => {
-  const width = 160;
-  const height = 120;
-  const reference = featuresFrom(texturedImage(width, height), width, height);
-  const previous = featuresFrom(texturedImage(width, height, 2, 2), width, height);
-  const current = featuresFrom(texturedImage(width, height, 6, 6), width, height);
+  const reference = Array.from({ length: 8 }, (_, index) => ({
+    id: `reference-${index}`,
+    x: 0.12 + (index % 4) * 0.2,
+    y: 0.2 + Math.floor(index / 4) * 0.3,
+    descriptor: [index, 1, 0, 0],
+    color: { r: 120, g: 130, b: 140 },
+    velocity: { x: 0, y: 0 },
+  }));
+  const previous = reference.map((feature) => ({ ...feature, x: feature.x + 0.01, y: feature.y + 0.01 }));
+  const current = reference.map((feature) => ({ ...feature, x: feature.x + 0.05, y: feature.y + 0.05 }));
   const evidence = buildFrameEvidence({
     previousFrame: { features: previous },
     currentFrame: { features: current },

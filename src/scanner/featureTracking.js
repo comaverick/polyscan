@@ -123,6 +123,8 @@ export function matchFrameFeatures(previousFeatures = [], currentFeatures = [], 
       current: best.current,
       confidence: clamp(1 - best.descriptor / maxDescriptorDistance) * clamp(1 - best.screenDistance / maxDistance),
       displacement: best.screenDistance,
+      dx: best.current.x - previous.x,
+      dy: best.current.y - previous.y,
     });
   });
   return matches;
@@ -165,21 +167,34 @@ export function buildFrameEvidence({ previousFrame, currentFrame, orientation = 
     const middle = Math.floor(ordered.length / 2);
     return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
   };
-  const parallax = median(matches
-    .filter((match) => match.confidence >= 0.2)
-    .map((match) => match.displacement));
+  const coherentParallax = (candidateMatches, minimumConfidence) => {
+    const usable = candidateMatches.filter((match) => match.confidence >= minimumConfidence);
+    if (usable.length < 8) return 0;
+    const displacement = median(usable.map((match) => match.displacement));
+    const medianDx = median(usable.map((match) => match.dx || 0));
+    const medianDy = median(usable.map((match) => match.dy || 0));
+    const spread = median(usable.map((match) => Math.hypot(
+      (match.dx || 0) - medianDx,
+      (match.dy || 0) - medianDy,
+    )));
+    // Real camera motion moves many details in a coherent direction. Random
+    // descriptor swaps on repeated textures do not, so they cannot advance
+    // the scan or create a new surface anchor.
+    const directionalConsistency = Math.hypot(medianDx, medianDy) / Math.max(0.000001, displacement);
+    const allowedSpread = Math.max(0.024, displacement * 0.72);
+    return directionalConsistency >= 0.68 && spread <= allowedSpread ? displacement : 0;
+  };
+  const parallax = coherentParallax(matches, 0.2);
   // A slow room sweep can move only a few pixels between two analysis ticks.
   // Compare against the last saved viewpoint as well, otherwise the scan
   // never accumulates enough motion to save the next view.
   const referenceMatches = referenceFeatures.length
     ? matchFrameFeatures(referenceFeatures, currentFeatures, {
-      maxDistance: 0.56,
-      maxDescriptorDistance: 0.7,
+      maxDistance: 0.4,
+      maxDescriptorDistance: 0.64,
     })
     : [];
-  const referenceParallax = median(referenceMatches
-    .filter((match) => match.confidence >= 0.16)
-    .map((match) => match.displacement));
+  const referenceParallax = coherentParallax(referenceMatches, 0.22);
   const accumulatedParallax = Math.max(parallax, referenceParallax);
   const yaw = Number.isFinite(orientation.yaw) ? orientation.yaw : 0;
   const pitch = Number.isFinite(orientation.pitch) ? orientation.pitch : 0;
