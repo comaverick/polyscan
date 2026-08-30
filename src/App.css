@@ -269,6 +269,8 @@ button { font: inherit; }
 }
 
 .footer-signal { display: inline-flex; align-items: center; gap: 7px; color: rgba(195, 223, 255, 0.75); font-size: 9px; letter-spacing: 0.1em; }
+.launch-version { display: inline-flex; align-items: center; gap: 6px; }
+.app-version { display: inline-flex; align-items: center; min-height: 18px; padding: 0 6px; border: 1px solid rgba(170, 229, 255, .3); border-radius: 999px; background: rgba(120, 204, 255, .1); color: rgba(213, 246, 255, .88); font-size: 9px; font-weight: 700; letter-spacing: .06em; line-height: 1; white-space: nowrap; }
 .signal-dot,
 .status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #8fe0ff; box-shadow: 0 0 0 3px rgba(104, 188, 255, 0.12); }
 
@@ -454,6 +456,10 @@ button { font: inherit; }
   left: 18px;
   z-index: 5;
 }
+
+.scan-branding,
+.build-branding { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.scan-branding .app-version { background: rgba(4, 13, 24, .4); }
 
 .scan-top-actions { display: flex; align-items: center; gap: 9px; }
 .scan-pill-button,

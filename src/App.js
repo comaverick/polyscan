@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
+import { APP_VERSION } from './appVersion';
 import {
   DEFAULT_VIEWPOINT_THRESHOLDS,
   createDirectionalCoverage,
@@ -113,6 +114,10 @@ function Wordmark({ compact = false }) {
       <span>PolyScan</span>
     </div>
   );
+}
+
+function VersionBadge({ className = '' }) {
+  return <span className={`app-version ${className}`.trim()} aria-label={`PolyScan version ${APP_VERSION}`}>v{APP_VERSION}</span>;
 }
 
 function CameraPlaceholder() {
@@ -501,7 +506,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
 
       <footer className="launch-footer">
         <span className="footer-signal"><span className="signal-dot" /> Camera-led mapping</span>
-        <span>Browser-native foundation</span>
+        <span className="launch-version">Web build <VersionBadge /></span>
       </footer>
     </main>
   );
@@ -844,7 +849,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       </section>
 
       <header className="scan-hud scan-reference-top">
-        <Wordmark compact />
+        <div className="scan-branding"><Wordmark compact /><VersionBadge /></div>
         <div className="scan-top-actions">
           <button type="button" className="scan-pill-button" onClick={() => setModeOpen((value) => !value)} aria-expanded={modeOpen}>
             <Icon name="tip" size={15} />
@@ -979,7 +984,7 @@ function ProcessingScreen({ buildState, onOpenViewer, onRetry, onBack }) {
         : 'A room viewer will appear here when processing is complete.';
   return (
     <main className="build-screen">
-      <header className="build-header"><button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to capture review"><Icon name="back" size={19} /></button><Wordmark compact /><span className="build-header-label">Room build</span></header>
+      <header className="build-header"><button type="button" className="viewer-header-button" onClick={onBack} aria-label="Back to capture review"><Icon name="back" size={19} /></button><div className="build-branding"><Wordmark compact /><VersionBadge /></div><span className="build-header-label">Room build</span></header>
       <section className="build-content">
         <div className="build-visual" aria-hidden="true">
           <div className="build-orbit build-orbit-one" />
