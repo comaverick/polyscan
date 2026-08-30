@@ -17,28 +17,30 @@ test('starts with a scan action and no progress UI', () => {
   expect(screen.queryByText(/\d+%/)).not.toBeInTheDocument();
 });
 
-test('opens the camera with blue unscanned tint and a surface sticker layer', () => {
+test('opens the camera with a user-controlled finish action and surface sticker layer', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
-  expect(screen.getByRole('button', { name: /done scanning, waiting/i })).toBeDisabled();
-  expect(screen.getByText(/Reconnect the camera/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Done scanning' })).toBeEnabled();
+  expect(screen.getByText(/Open PolyScan on HTTPS/i)).toBeInTheDocument();
   expect(document.querySelector('.surface-sticker-canvas')).toHaveAttribute('data-surface-stickers', '0');
   expect(document.querySelector('.coverage-canvas')).not.toBeInTheDocument();
   expect(screen.queryByLabelText('Directional room coverage map')).not.toBeInTheDocument();
+  expect(screen.queryByText('Adaptive scan guide')).not.toBeInTheDocument();
+  expect(screen.queryByText(/views saved/i)).not.toBeInTheDocument();
 });
 
 test('does not silently stay on starting camera when camera access is unavailable', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
   expect(screen.getByRole('alert')).toHaveTextContent(/camera access is needed/i);
-  expect(screen.getByText(/preview only/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Done scanning' })).toBeEnabled();
 });
 
 test('pause stops capture controls without removing the live camera surface', () => {
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
   const video = document.querySelector('video');
-  fireEvent.click(screen.getByRole('button', { name: /pause/i }));
+  fireEvent.click(screen.getByRole('button', { name: 'Pause scan' }));
   expect(screen.getByRole('button', { name: /resume/i })).toBeInTheDocument();
   expect(document.querySelector('video')).toBe(video);
 });

@@ -5,8 +5,6 @@ import {
   DEFAULT_VIEWPOINT_THRESHOLDS,
   createDirectionalCoverage,
   getVisibleCellIds,
-  hasCompleteRoomCoverage,
-  isReconstructionViable,
   selectBestKeyframes,
   updateDirectionalCoverage,
 } from './scanner/coverageModel';
@@ -29,7 +27,6 @@ import {
   loadVisionRuntime,
   trackPointsWithVision,
 } from './scanner/visionRuntime';
-import { getLiveScanAdvice, getScanCoachAdvice } from './scanner/scanCoach';
 import {
   captureVideoKeyframe,
   countCapturedKeyframes,
@@ -548,12 +545,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const analysisCanvasRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
   const orientationRef = useRef({ yaw: 0, pitch: 0 });
-  const [trackingState, setTrackingState] = useState('searching');
-  const [captureState, setCaptureState] = useState('waiting');
-  // Capture starts with the scan surface. Pause is the only capture toggle;
-  // the central control is visual feedback rather than a second workflow.
-  const [recording, setRecording] = useState(false);
-  const [modeOpen, setModeOpen] = useState(false);
+  // Polycam-style capture starts as soon as the camera opens. The center
+  // control can pause/resume it, while Done is always the user's choice.
+  const [recording, setRecording] = useState(true);
   const recorderRef = useRef(null);
   const recorderChunksRef = useRef([]);
   const recordingStartedAtRef = useRef(0);
@@ -709,7 +703,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       canvas.width = ANALYSIS_WIDTH;
       canvas.height = ANALYSIS_HEIGHT;
       context.drawImage(video, 0, 0, ANALYSIS_WIDTH, ANALYSIS_HEIGHT);
-      setCaptureState('frames');
       const currentFrame = {
         width: ANALYSIS_WIDTH,
         height: ANALYSIS_HEIGHT,
@@ -810,68 +803,14 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       };
       scanRef.current = nextState;
       onScanStateChange(nextState);
-      setTrackingState(evidence.tracking ? 'tracking' : current.lastFrame ? 'lost' : 'searching');
     };
 
     const timer = window.setInterval(captureFrame, CAPTURE_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [onScanStateChange, paused, recording, resumeCamera]);
 
-  const keyframeCount = scanState.cameraKeyframes.length;
-  const stableTrackCount = scanState.featureTracks.filter((track) => track.observations.length >= 2).length;
-  const viable = isReconstructionViable({
-    keyframes: keyframeCount,
-    distinctViewpoints: scanState.distinctViewpoints,
-    featureTracks: stableTrackCount,
-    meaningfulCameraMotion: scanState.meaningfulCameraMotion,
-  }) || (keyframeCount >= 8 && scanState.frameCount >= 20);
-  const mappingReady = keyframeCount > 0;
   const surfaceStickers = scanState.visibleSurfaceStickers || [];
   const surfacePatches = scanState.visibleSurfacePatches || [];
-  const minimumViews = 28;
-  const roomShellCovered = hasCompleteRoomCoverage(scanState.directionalCoverage);
-  const fullRoomReady = keyframeCount >= minimumViews && viable && roomShellCovered;
-  const captureProgress = Math.min(100, Math.round((keyframeCount / minimumViews) * 100));
-  const coach = getScanCoachAdvice({
-    directionalCoverage: scanState.directionalCoverage,
-    keyframes: keyframeCount,
-    evidence: scanState.lastEvidence,
-    roomShellCovered,
-    trackingState,
-  });
-  const visibleDetailCount = scanState.lastFrame?.features?.length || 0;
-  const liveAdvice = getLiveScanAdvice({
-    cameraState,
-    trackingState,
-    keyframes: keyframeCount,
-    visibleDetailCount,
-    evidence: scanState.lastEvidence,
-    recording,
-    surfaceLocked: scanState.visibleSurfaceAnchorCount > 0,
-  });
-  const instruction = paused
-    ? 'Paused'
-    : fullRoomReady
-      ? coach.instruction
-      : liveAdvice.instruction;
-  const cameraMessage = cameraState === 'unavailable'
-    ? 'Camera preview unavailable'
-    : cameraState === 'blocked'
-      ? 'Camera permission is waiting'
-      : cameraState === 'requesting'
-        ? 'Allow camera access'
-        : cameraState === 'live'
-          ? 'Camera live'
-          : 'Starting camera';
-  const statusLabel = trackingState === 'lost'
-    ? 'Tracking lost'
-    : cameraState === 'unavailable' || cameraState === 'blocked'
-      ? 'Preview only'
-      : cameraState === 'requesting'
-        ? 'Allow camera'
-        : recording
-          ? 'Recording'
-          : 'Ready';
   const handleDone = async () => {
     setFinishing(true);
     const capture = await stopCaptureRecording();
@@ -906,10 +845,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       <header className="scan-hud scan-reference-top">
         <div className="scan-branding"><Wordmark compact /><VersionBadge /></div>
         <div className="scan-top-actions">
-          <button type="button" className="scan-pill-button" onClick={() => setModeOpen((value) => !value)} aria-expanded={modeOpen}>
-            <Icon name="tip" size={15} />
-            <span>Tips</span>
-          </button>
           <button type="button" className="scan-icon-button scan-pause" onClick={onPause} aria-label={paused ? 'Resume scan' : 'Pause scan'}>
             <Icon name={paused ? 'play' : 'pause'} size={17} />
           </button>
@@ -919,49 +854,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         </div>
       </header>
 
-      {modeOpen && (
-        <div className="scan-tip-card" role="status">
-          <strong>Scan the room slowly</strong>
-          <span>Natural-color areas are unscanned. Blue points mark details confirmed across camera views.</span>
-        </div>
-      )}
-
-      <aside className="scan-capture-coach" aria-live="polite">
-        <div className="scan-capture-coach-heading">
-          <span className={`scan-coach-state${fullRoomReady ? ' is-ready' : ''}`}>{fullRoomReady ? 'Full room target reached' : roomShellCovered ? 'Room shell covered' : 'Adaptive scan guide'}</span>
-          <strong>{keyframeCount} / {minimumViews} views</strong>
-        </div>
-        <div className="scan-progress-meter" aria-label={`${keyframeCount} of ${minimumViews} minimum room views captured`}>
-          <span style={{ width: `${captureProgress}%` }} />
-        </div>
-        <strong className="scan-coach-title">{fullRoomReady ? coach.title : liveAdvice.title}</strong>
-        <p>{paused ? 'Resume when you are ready to continue the guided capture.' : fullRoomReady ? 'Make one optional final pass over anything you skipped, then finish the scan.' : liveAdvice.reason || coach.reason}</p>
-      </aside>
-
-      <div className="scan-status-row" role="status" aria-live="polite">
-        <span className={`scan-live-dot ${recording ? 'is-recording' : ''}`} />
-        <span>{statusLabel}</span>
-        <span className={`scan-quality-label is-${liveAdvice.state}`}>{liveAdvice.label}</span>
-        <span className="scan-frame-count">{mappingReady
-          ? scanState.visibleSurfaceAnchorCount > 0
-            ? trackingState === 'tracking' && scanState.visibleSurfaceAnchorCount > 0
-              ? `Surface locked / ${surfaceStickers.length} confirmed points`
-              : 'Reacquiring surface lock'
-            : `${keyframeCount} views saved / point back to restore marks`
-          : 'Natural color = unscanned / blue points = confirmed'}</span>
-      </div>
-
       <div className="scan-bottom-ui scan-reference-bottom">
-        <div className="scan-guidance" role="status" aria-live="polite">
-          <span className="guidance-toast">{instruction}</span>
-          {cameraMessage === 'Camera preview unavailable' && <small>Use a supported phone browser for live capture.</small>}
-        </div>
-
         <div className="scan-reference-controls">
-          <button type="button" className="scan-mode-button" onClick={() => setModeOpen((value) => !value)} aria-label="Scan mode Auto">
+          <div className="scan-mode-button" aria-hidden="true">
             <span>Auto</span>
             <span className="mode-chevron">⌃</span>
-          </button>
+          </div>
           <button
             type="button"
             className={`scan-map-control${recording ? ' is-active' : ''}`}
@@ -974,11 +872,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
             type="button"
             className="scan-done-button"
             onClick={handleDone}
-            disabled={!fullRoomReady || finishing}
-            aria-label={fullRoomReady ? 'Done scanning' : 'Done scanning, waiting for full room coverage'}
+            disabled={finishing}
+            aria-label="Done scanning"
           >
             <span className="done-check" aria-hidden="true">✓</span>
-            <span>{finishing ? 'Saving' : fullRoomReady ? 'Finish scan' : keyframeCount < minimumViews ? `Need ${Math.max(0, minimumViews - keyframeCount)} views` : 'Cover room shell'}</span>
+            <span>{finishing ? 'Saving' : 'Done'}</span>
           </button>
         </div>
       </div>
@@ -991,7 +889,6 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         </div>
       )}
       {recordingError && <div className="capture-warning" role="status">{recordingError}</div>}
-      <span className="capture-note" role="status">{mappingReady ? 'Mapping active' : captureState === 'frames' ? 'Camera frames active' : ''}</span>
     </main>
   );
 }
