@@ -259,7 +259,7 @@ function LaunchScreen({ onStart, onImportCapture, scanAvailable }) {
   );
 }
 
-function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, xrSession, onXrError, onRetryCamera, onCancel, onImportCapture }) {
+function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cameraStream, cameraState, captureMode, xrSession, onXrError, onRetryCamera, onCancel, onImportCapture }) {
   const videoRef = useRef(null);
   const analysisCanvasRef = useRef(null);
   const scanRef = useRef(createEmptyScanState());
@@ -567,6 +567,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           </button>
         </div>
       </div>
+      {captureMode === 'depth' && <div className="scan-capture-mode scan-capture-mode-depth" role="status">AR depth scan active</div>}
+      {captureMode === 'camera' && <div className="scan-capture-mode scan-capture-mode-fallback" role="status"><strong>Camera capture active</strong><span>AR depth is unavailable on this phone. A 3D room will be built after processing.</span></div>}
       {(cameraState === 'unavailable' || cameraState === 'blocked' || cameraState === 'requesting') && (
         <div className="camera-warning" role="alert">
           <strong>{cameraState === 'requesting' ? 'Allow camera access to begin mapping.' : 'Camera access is needed for live coverage.'}</strong>
@@ -669,6 +671,7 @@ function App() {
   const [buildState, setBuildState] = useState({ status: 'idle', progress: 0, jobId: null, error: null });
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraState, setCameraState] = useState('idle');
+  const [captureMode, setCaptureMode] = useState('idle');
   const [xrSession, setXrSession] = useState(null);
   const cameraRequestRef = useRef(null);
   const cameraSessionRef = useRef(0);
@@ -800,6 +803,7 @@ function App() {
   const retryCamera = useCallback(() => {
     cameraSessionRef.current += 1;
     stopCamera();
+    setCaptureMode('camera');
     requestCamera(cameraSessionRef.current);
   }, [requestCamera, stopCamera]);
 
@@ -808,6 +812,7 @@ function App() {
     xrSessionRef.current = null;
     setXrSession(null);
     session?.end?.().catch?.(() => {});
+    setCaptureMode('camera');
     requestCamera(cameraSessionRef.current);
   }, [requestCamera]);
 
@@ -816,6 +821,7 @@ function App() {
     stopCamera();
     endXrSession();
     clearLocalModel();
+    setCaptureMode('idle');
     setCameraState('idle');
     setScreen('launch');
   };
@@ -831,6 +837,7 @@ function App() {
     setReconstruction(null);
     setBuildState({ status: 'idle', progress: 0, jobId: null, error: null });
     setCameraState('requesting');
+    setCaptureMode('checking-depth');
     if (typeof window.DeviceOrientationEvent?.requestPermission === 'function') {
       window.DeviceOrientationEvent.requestPermission().catch(() => {});
     }
@@ -839,6 +846,7 @@ function App() {
     setScreen('scan');
     const sessionId = cameraSessionRef.current;
     if (!navigator.xr?.requestSession) {
+      setCaptureMode('camera');
       requestCamera(sessionId);
       return;
     }
@@ -846,11 +854,15 @@ function App() {
       if (session && cameraSessionRef.current === sessionId) {
         xrSessionRef.current = session;
         setXrSession(session);
+        setCaptureMode('depth');
         setCameraState('live');
         return;
       }
       session?.end?.().catch?.(() => {});
-      if (cameraSessionRef.current === sessionId) requestCamera(sessionId);
+      if (cameraSessionRef.current === sessionId) {
+        setCaptureMode('camera');
+        requestCamera(sessionId);
+      }
     });
   };
 
@@ -859,6 +871,7 @@ function App() {
     stopCamera();
     endXrSession();
     setCameraState('idle');
+    setCaptureMode('idle');
     setSelectedKeyframes(keyframes);
     saveCapture(recordedCapture);
     setReconstruction(null);
@@ -883,6 +896,7 @@ function App() {
     stopCamera();
     endXrSession();
     clearLocalModel();
+    setCaptureMode('idle');
     clearCapture();
     saveCapture({ blob: file, mimeType: file.type, durationMs: 0, imported: true });
     setSelectedKeyframes([]);
@@ -974,6 +988,7 @@ function App() {
         paused={paused}
         cameraStream={cameraStream}
         cameraState={cameraState}
+        captureMode={captureMode}
         xrSession={xrSession}
         onXrError={handleXrError}
         onPause={() => setPaused((value) => !value)}

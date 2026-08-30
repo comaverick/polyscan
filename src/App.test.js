@@ -21,6 +21,8 @@ test('opens the camera with a user-controlled finish action and no fake geometry
   render(<App />);
   fireEvent.click(screen.getByRole('button', { name: /start scan/i }));
   expect(screen.getByRole('button', { name: 'Done scanning' })).toBeEnabled();
+  expect(screen.getByText(/Camera capture active/i)).toBeInTheDocument();
+  expect(screen.getByText(/3D room will be built after processing/i)).toBeInTheDocument();
   expect(screen.getByText(/Allow camera access/i)).toBeInTheDocument();
   expect(document.querySelector('.surface-sticker-canvas')).not.toBeInTheDocument();
   expect(document.querySelector('.coverage-canvas')).not.toBeInTheDocument();
