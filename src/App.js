@@ -512,7 +512,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   };
 
   return (
-    <main className="scan-screen" onPointerDown={resumeCamera}>
+    <main className={`scan-screen${xrSession ? ' is-xr-scan' : ''}`} onPointerDown={resumeCamera}>
       <section className="scan-preview-frame" aria-label="Room camera preview">
         {xrSession
           ? <WebXRDepthScanner session={xrSession} onPointCloud={publishXrPointCloud} onSessionError={onXrError} />

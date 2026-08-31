@@ -17,6 +17,7 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !session) return undefined;
+    canvas.style.background = 'transparent';
     let cancelled = false;
     let renderer;
     let resizeObserver;
@@ -76,18 +77,24 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
         renderer = new THREE.WebGLRenderer({
           canvas,
           alpha: true,
+          premultipliedAlpha: false,
           antialias: true,
           powerPreference: 'high-performance',
         });
+        // Be explicit about the transparent XR framebuffer. Some Android
+        // WebXR implementations otherwise present the camera passthrough as a
+        // black layer when the default premultiplied clear state is retained.
+        renderer.setClearColor(0x000000, 0);
+        renderer.setClearAlpha(0);
         renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
         renderer.xr.enabled = true;
-        renderer.xr.setReferenceSpaceType('local-floor');
+        // `local` is required by our session request and is supported on more
+        // ARCore devices than `local-floor`. The floor space remains optional;
+        // using the required space here prevents a successful AR session from
+        // going black while Three.js waits for an unavailable floor space.
+        renderer.xr.setReferenceSpaceType('local');
         await renderer.xr.setSession(session);
-        try {
-          referenceSpace = await session.requestReferenceSpace('local-floor');
-        } catch {
-          referenceSpace = await session.requestReferenceSpace('local');
-        }
+        referenceSpace = renderer.xr.getReferenceSpace?.() || await session.requestReferenceSpace('local');
         if (cancelled) return;
 
         const scene = new THREE.Scene();

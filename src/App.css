@@ -459,6 +459,7 @@ button { font: inherit; }
 .scan-preview-frame .xr-depth-canvas { z-index: 1; pointer-events: none; }
 .scan-preview-frame .xr-depth-canvas { display: block; }
 .scan-screen::after { z-index: 2; background: linear-gradient(180deg, rgba(0, 0, 0, .46), transparent 22%, transparent 67%, rgba(0, 0, 0, .86)); }
+.scan-screen.is-xr-scan::after { background: transparent; }
 
 .scan-reference-top {
   top: max(18px, env(safe-area-inset-top));
