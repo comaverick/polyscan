@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
 import {
-  getStableScanMarkers,
-  mergePointCloud,
+  IncrementalDepthStore,
   sampleDepthPointCloud,
   WEBXR_DEPTH_OPTIONS,
 } from './webxrDepth';
@@ -30,13 +29,20 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
     let positionAttribute;
     let colorAttribute;
     let referenceSpace;
-    let points = [];
+    const scanStore = new IncrementalDepthStore(WEBXR_DEPTH_OPTIONS);
     let lastPublishedAt = 0;
+    let lastDepthSampleAt = 0;
+    let lastFrameTime = 0;
+    let frameTimeAverage = 16.7;
+    let lastQualityAdjustAt = 0;
+    let sampleGrid = Math.max(12, Math.min(22, WEBXR_DEPTH_OPTIONS.sampleGrid));
+    let sampleIntervalMs = 100;
+    let depthBatchCount = 0;
+    let depthSampleCount = 0;
 
-    const updateGeometry = () => {
+    const updateGeometry = (addedPoints = []) => {
       if (!pointGeometry || !positionAttribute || !colorAttribute) return;
-      const count = Math.min(points.length, WEBXR_DEPTH_OPTIONS.maximumPoints);
-      points.slice(0, count).forEach((point, index) => {
+      addedPoints.forEach(({ point, index }) => {
         const offset = index * 3;
         positionAttribute.array[offset] = point.x;
         positionAttribute.array[offset + 1] = point.y;
@@ -45,21 +51,24 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
         colorAttribute.array[offset + 1] = (point.g ?? 211) / 255;
         colorAttribute.array[offset + 2] = (point.b ?? 255) / 255;
       });
-      positionAttribute.needsUpdate = true;
-      colorAttribute.needsUpdate = true;
+      const count = scanStore.points.length;
+      if (addedPoints.length) {
+        positionAttribute.needsUpdate = true;
+        colorAttribute.needsUpdate = true;
+      }
       pointGeometry.setDrawRange(0, count);
-      pointGeometry.computeBoundingSphere();
     };
 
-    const updateMarkers = (THREE) => {
-      if (!markerMesh || !points.length) return;
-      const markers = getStableScanMarkers(points);
+    const updateMarkers = (THREE, addedMarkers = [], updatedMarkers = []) => {
+      if (!markerMesh || (!addedMarkers.length && !updatedMarkers.length)) return;
       const matrix = new THREE.Matrix4();
-      markers.forEach((point, index) => {
+      [...addedMarkers, ...updatedMarkers].forEach((point) => {
         matrix.makeTranslation(point.x, point.y, point.z);
-        markerMesh.setMatrixAt(index, matrix);
+        markerMesh.setMatrixAt(point.index, matrix);
       });
-      markerMesh.count = markers.length;
+      markerMesh.count = scanStore.confirmedMarkerCount;
+      // Matrix updates are limited to confirmed/new markers. The old code
+      // rebuilt every marker matrix from every point on every XR frame.
       markerMesh.instanceMatrix.needsUpdate = true;
     };
 
@@ -78,7 +87,7 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
           canvas,
           alpha: true,
           premultipliedAlpha: false,
-          antialias: true,
+          antialias: false,
           powerPreference: 'high-performance',
         });
         // Be explicit about the transparent XR framebuffer. Some Android
@@ -86,7 +95,7 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
         // black layer when the default premultiplied clear state is retained.
         renderer.setClearColor(0x000000, 0);
         renderer.setClearAlpha(0);
-        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
         renderer.xr.enabled = true;
         // `local` is required by our session request and is supported on more
         // ARCore devices than `local-floor`. The floor space remains optional;
@@ -113,23 +122,21 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
           opacity: 0.92,
         });
         pointCloud = new THREE.Points(pointGeometry, pointMaterial);
+        pointCloud.frustumCulled = false;
         scene.add(pointCloud);
-        markerGeometry = new THREE.BoxGeometry(
-          WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.68,
-          WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.68,
-          WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.68,
-        );
+        const markerSize = WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.58;
+        markerGeometry = new THREE.BoxGeometry(markerSize, markerSize, Math.max(0.008, markerSize * 0.08));
         markerMaterial = new THREE.MeshBasicMaterial({
-          color: 0x63b9ff,
+          color: 0x3db7ff,
           transparent: true,
-          opacity: 0.62,
-          wireframe: true,
+          opacity: 0.78,
           depthWrite: false,
         });
         markerMesh = new THREE.InstancedMesh(markerGeometry, markerMaterial, WEBXR_DEPTH_OPTIONS.maximumMarkers);
         markerMesh.count = 0;
         markerMesh.frustumCulled = false;
         markerMesh.renderOrder = 2;
+        markerMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         scene.add(markerMesh);
         resize();
         resizeObserver = window.ResizeObserver ? new ResizeObserver(resize) : null;
@@ -137,17 +144,47 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
 
         renderer.setAnimationLoop((time, frame) => {
           if (cancelled) return;
-          if (frame && referenceSpace) {
+          const frameTime = lastFrameTime ? Math.max(0, time - lastFrameTime) : 16.7;
+          lastFrameTime = time;
+          frameTimeAverage = frameTimeAverage * 0.9 + frameTime * 0.1;
+
+          if (frame && referenceSpace && time - lastDepthSampleAt >= sampleIntervalMs) {
+            lastDepthSampleAt = time;
             let pose = null;
             try { pose = frame.getViewerPose(referenceSpace); } catch { pose = null; }
-            const freshPoints = pose ? sampleDepthPointCloud(frame, pose, { sampleGrid: 28 }) : [];
+            const processingStartedAt = performance.now();
+            const freshPoints = pose ? sampleDepthPointCloud(frame, pose, { sampleGrid }) : [];
             if (freshPoints.length) {
-              points = mergePointCloud(points, freshPoints);
-              updateGeometry();
-              updateMarkers(THREE);
+              const result = scanStore.addPoints(freshPoints);
+              updateGeometry(result.addedPoints);
+              updateMarkers(THREE, result.addedMarkers, result.updatedMarkers);
+              depthBatchCount += 1;
+              depthSampleCount += freshPoints.length;
               if (time - lastPublishedAt > 450) {
                 lastPublishedAt = time;
-                onPointCloud(points);
+                onPointCloud({
+                  points: result.points,
+                  pointCount: result.pointCount,
+                  markerCount: result.markerCount,
+                  depthBatchCount,
+                  depthSampleCount,
+                  sampleGrid,
+                  sampleIntervalMs,
+                });
+              }
+            }
+
+            const processingMs = performance.now() - processingStartedAt;
+            if (time - lastQualityAdjustAt >= 1000) {
+              lastQualityAdjustAt = time;
+              const overloaded = frameTimeAverage > 25 || processingMs > 18;
+              const underBudget = frameTimeAverage < 18 && processingMs < 10;
+              if (overloaded) {
+                sampleIntervalMs = Math.min(180, sampleIntervalMs + 20);
+                sampleGrid = Math.max(12, sampleGrid - 2);
+              } else if (underBudget) {
+                sampleIntervalMs = Math.max(90, sampleIntervalMs - 10);
+                sampleGrid = Math.min(22, sampleGrid + 1);
               }
             }
           }

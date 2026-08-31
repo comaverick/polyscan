@@ -88,6 +88,7 @@ const createEmptyScanState = () => ({
   meaningfulCameraMotion: false,
   stableFeatures: [],
   webXRPointCloud: [],
+  webXRScanStats: null,
   lastFrame: null,
   lastViewpoint: null,
   lastEvidence: null,
@@ -270,6 +271,9 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const recorderRef = useRef(null);
   const recorderChunksRef = useRef([]);
   const recordingStartedAtRef = useRef(0);
+  const xrPublishAtRef = useRef(0);
+  const xrPointCloudRef = useRef([]);
+  const xrScanStatsRef = useRef(null);
   const [recordingError, setRecordingError] = useState('');
   const [finishing, setFinishing] = useState(false);
 
@@ -314,7 +318,19 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   }, []);
 
   useEffect(() => {
-    scanRef.current = scanState;
+    // Keep the renderer-owned cloud when an unrelated React update (pause,
+    // recording, or a status change) causes this component to render again.
+    // Otherwise the latest un-published depth points could be overwritten by
+    // the previous React snapshot just before Done is pressed.
+    if (xrPointCloudRef.current.length) {
+      scanRef.current = {
+        ...scanState,
+        webXRPointCloud: xrPointCloudRef.current,
+        webXRScanStats: xrScanStatsRef.current,
+      };
+    } else {
+      scanRef.current = scanState;
+    }
   }, [scanState]);
 
   useEffect(() => {
@@ -405,9 +421,28 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     try { recorder.stop(); } catch { finalize(); }
   }), []);
 
-  const publishXrPointCloud = useCallback((points) => {
-    const nextState = { ...scanRef.current, webXRPointCloud: points };
+  const publishXrPointCloud = useCallback((payload) => {
+    const points = Array.isArray(payload) ? payload : payload?.points || [];
+    const nextState = {
+      ...scanRef.current,
+      webXRPointCloud: points,
+      webXRScanStats: Array.isArray(payload) ? null : {
+        pointCount: payload?.pointCount || points.length,
+        markerCount: payload?.markerCount || 0,
+        depthBatchCount: payload?.depthBatchCount || 0,
+        depthSampleCount: payload?.depthSampleCount || 0,
+        sampleGrid: payload?.sampleGrid || 0,
+        sampleIntervalMs: payload?.sampleIntervalMs || 0,
+      },
+    };
+    xrPointCloudRef.current = points;
+    xrScanStatsRef.current = nextState.webXRScanStats;
     scanRef.current = nextState;
+    // The renderer owns the live point cloud. React only needs an occasional
+    // snapshot for scan completion and status, not one update per depth batch.
+    const now = performance.now();
+    if (now - xrPublishAtRef.current < 1000) return;
+    xrPublishAtRef.current = now;
     onScanStateChange(nextState);
   }, [onScanStateChange]);
 
@@ -456,17 +491,21 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         parallax: evidence.parallax,
       });
       const isFirstKeyframe = current.cameraKeyframes.length === 0;
-      let thumbnail = null;
-      try {
-        thumbnail = canvas.toDataURL('image/jpeg', 0.72);
-      } catch {
-        // Canvas export can be unavailable in restricted browsers.
-      }
       // Do not inflate the scan count on a timer. A saved view must either be
       // the first lock or contain demonstrably new camera evidence.
       const shouldCaptureKeyframe = recording && evidence.tracking
         && (isFirstKeyframe || evidence.usefulViewpoint)
         && current.cameraKeyframes.length < 96;
+      let thumbnail = null;
+      if (shouldCaptureKeyframe) {
+        try {
+          // JPEG encoding is relatively expensive on mobile. Only encode a
+          // thumbnail after the frame has passed the capture-quality checks.
+          thumbnail = canvas.toDataURL('image/jpeg', 0.72);
+        } catch {
+          // Canvas export can be unavailable in restricted browsers.
+        }
+      }
       const keyframeId = `keyframe-${current.cameraKeyframes.length + 1}`;
       const nextKeyframes = shouldCaptureKeyframe
         ? [...current.cameraKeyframes, {
@@ -506,9 +545,10 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
     setFinishing(true);
     const capture = await stopCaptureRecording();
     setRecording(false);
-    const selected = selectBestKeyframes(scanState.cameraKeyframes, 48);
+    const finalScanState = scanRef.current;
+    const selected = selectBestKeyframes(finalScanState.cameraKeyframes, 48);
     const resolved = await resolveKeyframeAssets(selected);
-    onDone(resolved, capture, scanState);
+    onDone(resolved, capture, finalScanState);
   };
 
   return (

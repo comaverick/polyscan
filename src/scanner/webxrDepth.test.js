@@ -1,4 +1,5 @@
 import {
+  IncrementalDepthStore,
   mergePointCloud,
   getStableScanMarkers,
   requestDepthSession,
@@ -28,11 +29,29 @@ test('converts normalized depth samples into world-space points', () => {
     getDepthInformation: () => ({ getDepthInMeters: () => 2 }),
   };
   const pose = {
-    views: [{ projectionMatrix, transform: { inverse: { matrix: projectionMatrix } } }],
+    views: [{ projectionMatrix, transform: { matrix: projectionMatrix } }],
   };
   const points = sampleDepthPointCloud(frame, pose, { sampleGrid: 4 });
   expect(points).toHaveLength(25);
   expect(points[0]).toMatchObject({ x: -2, y: 2, z: -2, r: 118, g: 211, b: 255 });
+});
+
+test('uses the forward XR view transform to place depth points in reference space', () => {
+  const projectionMatrix = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    3, 4, 5, 1,
+  ];
+  const frame = { getDepthInformation: () => ({ getDepthInMeters: () => 1 }) };
+  const pose = { views: [{ projectionMatrix: [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ], transform: { matrix: projectionMatrix } }] };
+  const [point] = sampleDepthPointCloud(frame, pose, { sampleGrid: 4 });
+  expect(point).toMatchObject({ x: 2, y: 5, z: 4 });
 });
 
 test('voxel merges repeated depth samples and serializes a valid PLY', () => {
@@ -55,4 +74,22 @@ test('stable scan markers keep one world-space position per coarse voxel', () =>
   ], { markerVoxelSize: 0.08 });
   expect(markers).toHaveLength(2);
   expect(markers[0]).toEqual({ x: 1, y: 2, z: 3 });
+});
+
+test('incremental depth store confirms and then freezes stable markers', () => {
+  const store = new IncrementalDepthStore({
+    markerConfirmationFrames: 2,
+    markerStabilizationFrames: 3,
+    maximumMarkers: 4,
+  });
+  const first = store.addPoints([{ x: 1, y: 2, z: 3 }]);
+  expect(first.addedMarkers).toHaveLength(0);
+  const second = store.addPoints([{ x: 1.01, y: 2.01, z: 3.01 }]);
+  expect(second.addedMarkers).toHaveLength(1);
+  expect(second.markerCount).toBe(1);
+  const third = store.addPoints([{ x: 1.03, y: 2.03, z: 3.03 }]);
+  expect(third.updatedMarkers).toHaveLength(1);
+  const fourth = store.addPoints([{ x: 1.1, y: 2.1, z: 3.1 }]);
+  expect(fourth.updatedMarkers).toHaveLength(0);
+  expect(store.getMarkers()[0]).toMatchObject({ x: 1.0133333333333334, y: 2.013333333333333, z: 3.013333333333333 });
 });
