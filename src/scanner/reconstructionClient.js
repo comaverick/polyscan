@@ -1,3 +1,5 @@
+import { serializePointCloudToPly } from './webxrDepth';
+
 const endpoint = (process.env.REACT_APP_RECONSTRUCTION_API_URL || '').replace(/\/$/, '');
 
 export function hasReconstructionEndpoint() {
@@ -64,7 +66,7 @@ function uploadWithProgress(url, blob, onProgress, signal) {
   });
 }
 
-export function buildCaptureAssets({ capture, keyframes = [] } = {}) {
+export function buildCaptureAssets({ capture, keyframes = [], pointCloud = [] } = {}) {
   const assets = [];
   if (capture?.blob) {
     const isWebm = String(capture.blob.type || '').includes('webm');
@@ -88,6 +90,17 @@ export function buildCaptureAssets({ capture, keyframes = [] } = {}) {
       keyframeId: frame.id,
     });
   });
+  if (pointCloud.length >= 100) {
+    const ply = serializePointCloudToPly(pointCloud);
+    const blob = new Blob([ply], { type: 'application/octet-stream' });
+    assets.push({
+      id: 'depth-pointcloud',
+      kind: 'pointcloud',
+      filename: 'depth-scan.ply',
+      contentType: 'application/octet-stream',
+      blob,
+    });
+  }
   return assets;
 }
 
@@ -122,10 +135,10 @@ async function uploadAssets(uploadSession, assets, onProgress, signal) {
   await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
 }
 
-export async function submitCapture({ capture, keyframes = [], manifest, onProgress = () => {}, signal } = {}) {
+export async function submitCapture({ capture, keyframes = [], pointCloud = [], manifest, onProgress = () => {}, signal } = {}) {
   if (!endpoint) throw new Error('No reconstruction endpoint is configured.');
-  const assets = buildCaptureAssets({ capture, keyframes });
-  if (!assets.length) throw new Error('There are no room images or video to upload.');
+  const assets = buildCaptureAssets({ capture, keyframes, pointCloud });
+  if (!assets.length) throw new Error('There are no room images, video, or measured depth points to upload.');
 
   const upload = await requestJson(`${endpoint}/uploads`, {
     method: 'POST',
@@ -170,6 +183,8 @@ export function createCaptureManifest(scanState = {}, keyframes = []) {
     frameCount: scanState.frameCount || 0,
     viewpointCount: keyframes.length,
     imageCount: keyframes.filter((frame) => Boolean(frame.capture?.blob)).length,
+    depthPointCount: Array.isArray(scanState.webXRPointCloud) ? scanState.webXRPointCloud.length : 0,
+    depthMarkerCount: Number(scanState.webXRScanStats?.markerCount || 0),
     coverage: (scanState.directionalCoverage || []).map((cell) => ({
       id: cell.id,
       coverage: Number(cell.coverage || 0),

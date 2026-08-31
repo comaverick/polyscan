@@ -104,7 +104,7 @@ async function startJob(job, capture) {
       modelUrl: `${publicBaseUrl}/models/${job.id}/room.ply`,
       modelFormat: result.format,
       modelKind: result.kind,
-      coordinateSystem: 'colmap-camera',
+      coordinateSystem: result.coordinateSystem || 'colmap-camera',
       imageCount: result.imageCount,
     };
   } catch (error) {

@@ -53,7 +53,35 @@ async function prepareImages({ captureDirectory, assets, workspace, onProgress }
   return { imagesDirectory, imageCount };
 }
 
+async function runDepthPipeline({ captureDirectory, assets, workspace, onProgress = () => {} }) {
+  const [pointCloud] = existingAssets(captureDirectory, assets, 'pointcloud');
+  if (!pointCloud) throw new Error('The depth scan did not include a point cloud asset.');
+  fs.mkdirSync(workspace, { recursive: true });
+  const modelPath = path.join(workspace, 'room.ply');
+  const colmap = process.env.COLMAP_PATH || 'colmap';
+  onProgress(25, 'Preparing the measured depth surface');
+  try {
+    // COLMAP can close an oriented depth cloud into a surface when its
+    // Poisson mesher is available. The uploaded PLY includes normals from the
+    // browser depth grid, so this path does not need camera images.
+    await run(colmap, ['poisson_mesher', '--input_path', pointCloud.path, '--output_path', modelPath], { cwd: workspace });
+    if (fs.existsSync(modelPath)) {
+      onProgress(100, 'Depth room mesh ready');
+      return { modelPath, imageCount: 0, format: 'ply', kind: 'mesh', coordinateSystem: 'world' };
+    }
+  } catch {
+    // A raw point cloud remains a valid geometric preview when COLMAP is not
+    // installed or cannot close an incomplete room surface.
+  }
+  fs.copyFileSync(pointCloud.path, modelPath);
+  onProgress(100, 'Depth point cloud ready');
+  return { modelPath, imageCount: 0, format: 'ply', kind: 'pointcloud', pointSize: 0.018, coordinateSystem: 'world' };
+}
+
 async function runColmapPipeline({ captureDirectory, assets, workspace, onProgress = () => {} }) {
+  if (existingAssets(captureDirectory, assets, 'pointcloud').length) {
+    return runDepthPipeline({ captureDirectory, assets, workspace, onProgress });
+  }
   const colmap = process.env.COLMAP_PATH || 'colmap';
   fs.mkdirSync(workspace, { recursive: true });
   const { imagesDirectory, imageCount } = await prepareImages({ captureDirectory, assets, workspace, onProgress });

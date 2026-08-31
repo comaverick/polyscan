@@ -14,7 +14,7 @@ import {
   updateFeatureTracks,
 } from './scanner/featureTracking';
 import WebXRDepthScanner from './scanner/WebXRDepthScanner';
-import { requestDepthSession, serializePointCloudToPly } from './scanner/webxrDepth';
+import { requestDepthSession } from './scanner/webxrDepth';
 import {
   captureVideoKeyframe,
   countCapturedKeyframes,
@@ -625,11 +625,13 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   );
 }
 
-function ReviewScreen({ selectedKeyframes, capture, processingAvailable, onProcess, onScanAgain }) {
+function ReviewScreen({ selectedKeyframes, capture, scanState, processingAvailable, onProcess, onScanAgain }) {
   const preview = selectedKeyframes.find((frame) => frame.thumbnail)?.thumbnail;
   const hasVideo = Boolean(capture?.blob);
   const imageCount = countCapturedKeyframes(selectedKeyframes);
-  const hasCapture = hasVideo || imageCount >= 8;
+  const depthPointCount = Array.isArray(scanState?.webXRPointCloud) ? scanState.webXRPointCloud.length : 0;
+  const hasDepth = depthPointCount >= 100;
+  const hasCapture = hasVideo || imageCount >= 8 || hasDepth;
   const duration = capture?.durationMs ? `${Math.max(1, Math.round(capture.durationMs / 1000))}s` : hasVideo ? 'Video' : imageCount ? 'Images' : 'None';
   return (
     <main className="review-screen capture-review-screen">
@@ -637,15 +639,16 @@ function ReviewScreen({ selectedKeyframes, capture, processingAvailable, onProce
       <section className="capture-review-content">
         <div className="review-preview-card">
           {capture?.url ? <video className="review-capture-video" src={capture.url} controls playsInline preload="metadata" aria-label="Recorded room capture" /> : preview ? <img src={preview} alt="Selected room viewpoint" /> : <div className="review-preview-placeholder" aria-hidden="true"><div /><span /></div>}
-          <div className="review-preview-overlay"><span className="scan-live-dot" /> {hasVideo ? 'Video and images ready' : hasCapture ? 'Image set ready' : 'Capture incomplete'}</div>
+          <div className="review-preview-overlay"><span className="scan-live-dot" /> {hasDepth ? 'Measured depth map ready' : hasVideo ? 'Video and images ready' : hasCapture ? 'Image set ready' : 'Capture incomplete'}</div>
         </div>
         <div className="review-copy-block">
           <p className="eyebrow">Scan complete</p>
           <h1>Review your<br /><span>room capture.</span></h1>
-          <p>{hasCapture ? 'Your overlapping camera views are ready for server-side photogrammetry and a real room mesh.' : 'Scan more overlapping views before PolyScan can reconstruct the room.'}</p>
+          <p>{hasDepth ? 'Your measured depth map is ready to turn into a room surface. The reconstruction service will close it into a first-person model.' : hasCapture ? 'Your overlapping camera views are ready for server-side photogrammetry and a real room mesh.' : 'Scan more overlapping views before PolyScan can reconstruct the room.'}</p>
           <div className="review-stats" aria-label="Capture summary">
             <span><strong>{selectedKeyframes.length || 0}</strong> viewpoints</span>
             <span><strong>{imageCount}</strong> full-size images</span>
+            {hasDepth && <span><strong>{depthPointCount.toLocaleString()}</strong> depth points</span>}
             <span><strong>{duration}</strong> capture</span>
           </div>
           <div className="review-actions">
@@ -922,21 +925,18 @@ function App() {
     endXrSession();
     setCameraState('idle');
     setCaptureMode('idle');
+    // Commit the renderer's final snapshot before showing review. Depth
+    // samples are published on a throttled cadence, so the snapshot passed
+    // by ScanScreen can be newer than the last React state update.
+    setScanState(scanSnapshot || createEmptyScanState());
     setSelectedKeyframes(keyframes);
     saveCapture(recordedCapture);
     setReconstruction(null);
+    clearLocalModel();
     setBuildState({ status: 'idle', progress: 0, jobId: null, error: null, manifest: createCaptureManifest(scanSnapshot, keyframes) });
-    const pointCloud = scanSnapshot?.webXRPointCloud || [];
-    if (pointCloud.length >= 100) {
-      clearLocalModel();
-      const blob = new Blob([serializePointCloudToPly(pointCloud)], { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      localModelUrlRef.current = url;
-      setReconstruction({ modelUrl: url, modelFormat: 'ply', modelKind: 'pointcloud', pointSize: 0.025 });
-      setBuildState({ status: 'ready', progress: 100, jobId: null, error: null, manifest: createCaptureManifest(scanSnapshot, keyframes) });
-      setScreen('viewer');
-      return;
-    }
+    // A depth cloud is input to reconstruction, not a finished room. Keeping
+    // it on review prevents the old behavior where a raw curled cloud opened
+    // as if it were a completed first-person room.
     setScreen('review');
   };
 
@@ -992,8 +992,10 @@ function App() {
     const manifest = createCaptureManifest(scanState, selectedKeyframes);
     setScreen('processing');
     const imageCount = countCapturedKeyframes(selectedKeyframes);
-    if (!capture?.blob && imageCount < 8) {
-      setBuildState({ status: 'error', progress: 0, jobId: null, error: 'At least eight full-size room viewpoints or a recorded video are required.', manifest });
+    const pointCloud = Array.isArray(scanState.webXRPointCloud) ? scanState.webXRPointCloud : [];
+    const hasDepth = pointCloud.length >= 100;
+    if (!capture?.blob && imageCount < 8 && !hasDepth) {
+      setBuildState({ status: 'error', progress: 0, jobId: null, error: 'Scan more of the room before building. A depth scan needs at least 100 measured points, or eight full-size viewpoints.', manifest });
       return;
     }
     if (!hasReconstructionEndpoint()) {
@@ -1007,6 +1009,7 @@ function App() {
     checkReconstructionService({ signal: controller.signal }).then(() => submitCapture({
       capture,
       keyframes: selectedKeyframes,
+      pointCloud,
       manifest,
       signal: controller.signal,
       onProgress: (progress) => setBuildState((current) => ({ ...current, status: 'uploading', progress })),
@@ -1050,7 +1053,7 @@ function App() {
       />
     );
   } else if (screen === 'review') {
-    activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} capture={capture} processingAvailable={hasReconstructionEndpoint()} onProcess={startBuild} onScanAgain={startScan} />;
+    activeScreen = <ReviewScreen selectedKeyframes={selectedKeyframes} capture={capture} scanState={scanState} processingAvailable={hasReconstructionEndpoint()} onProcess={startBuild} onScanAgain={startScan} />;
   } else if (screen === 'processing') {
     activeScreen = <ProcessingScreen buildState={buildState} onOpenViewer={openViewer} onRetry={startBuild} onBack={backToReview} />;
   } else activeScreen = <RoomViewerScreen selectedKeyframes={selectedKeyframes} reconstruction={reconstruction} onBack={() => setScreen('review')} />;

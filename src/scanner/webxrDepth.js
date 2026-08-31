@@ -451,6 +451,7 @@ export function getStableScanMarkers(points = [], options = {}) {
 
 export function serializePointCloudToPly(points = []) {
   const validPoints = points.filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y) && Number.isFinite(point?.z));
+  const hasNormals = validPoints.some((point) => Number.isFinite(point?.nx) && Number.isFinite(point?.ny) && Number.isFinite(point?.nz));
   const header = [
     'ply',
     'format ascii 1.0',
@@ -461,9 +462,18 @@ export function serializePointCloudToPly(points = []) {
     'property uchar red',
     'property uchar green',
     'property uchar blue',
+    ...(hasNormals ? ['property float nx', 'property float ny', 'property float nz'] : []),
     'end_header',
   ].join('\n');
-  const rows = validPoints.map((point) => `${point.x.toFixed(5)} ${point.y.toFixed(5)} ${point.z.toFixed(5)} ${Math.round(point.r ?? 118)} ${Math.round(point.g ?? 211)} ${Math.round(point.b ?? 255)}`);
+  const rows = validPoints.map((point) => {
+    const values = [point.x.toFixed(5), point.y.toFixed(5), point.z.toFixed(5), Math.round(point.r ?? 118), Math.round(point.g ?? 211), Math.round(point.b ?? 255)];
+    if (hasNormals) values.push(
+      Number.isFinite(point.nx) ? point.nx.toFixed(5) : '0',
+      Number.isFinite(point.ny) ? point.ny.toFixed(5) : '0',
+      Number.isFinite(point.nz) ? point.nz.toFixed(5) : '0',
+    );
+    return values.join(' ');
+  });
   return `${header}\n${rows.join('\n')}\n`;
 }
 
