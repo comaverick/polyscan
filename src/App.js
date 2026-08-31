@@ -429,8 +429,11 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       webXRScanStats: Array.isArray(payload) ? null : {
         pointCount: payload?.pointCount || points.length,
         markerCount: payload?.markerCount || 0,
+        depthFrameCount: payload?.depthFrameCount || 0,
         depthBatchCount: payload?.depthBatchCount || 0,
         depthSampleCount: payload?.depthSampleCount || 0,
+        emptyDepthBatchCount: payload?.emptyDepthBatchCount || 0,
+        storageCapacityReached: Boolean(payload?.storageCapacityReached),
         sampleGrid: payload?.sampleGrid || 0,
         sampleIntervalMs: payload?.sampleIntervalMs || 0,
       },
@@ -761,19 +764,6 @@ function App() {
     if (session) session.end?.().catch?.(() => {});
   }, []);
 
-  useEffect(() => {
-    xrSessionRef.current = xrSession;
-    if (!xrSession) return undefined;
-    const handleEnd = () => {
-      if (xrSessionRef.current !== xrSession) return;
-      xrSessionRef.current = null;
-      setXrSession(null);
-      setCameraState('idle');
-    };
-    xrSession.addEventListener?.('end', handleEnd);
-    return () => xrSession.removeEventListener?.('end', handleEnd);
-  }, [xrSession]);
-
   const stopCamera = useCallback(() => {
     setCameraStream((stream) => {
       if (stream) stream.getTracks().forEach((track) => track.stop());
@@ -839,6 +829,26 @@ function App() {
       if (requestActive && cameraSessionRef.current === sessionId) setCameraState('unavailable');
     });
   }, []);
+
+  useEffect(() => {
+    xrSessionRef.current = xrSession;
+    if (!xrSession) return undefined;
+    const handleEnd = () => {
+      if (xrSessionRef.current !== xrSession) return;
+      xrSessionRef.current = null;
+      setXrSession(null);
+      setCameraState('idle');
+      // A browser or XR runtime can end an immersive session when the tab is
+      // backgrounded, the camera is interrupted, or depth sensing is paused.
+      // Recover to the normal camera path instead of leaving a dead scan UI.
+      if (captureMode === 'depth') {
+        setCaptureMode('camera');
+        requestCamera(cameraSessionRef.current);
+      }
+    };
+    xrSession.addEventListener?.('end', handleEnd);
+    return () => xrSession.removeEventListener?.('end', handleEnd);
+  }, [captureMode, requestCamera, xrSession]);
 
   const retryCamera = useCallback(() => {
     cameraSessionRef.current += 1;

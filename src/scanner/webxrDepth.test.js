@@ -54,6 +54,35 @@ test('uses the forward XR view transform to place depth points in reference spac
   expect(point).toMatchObject({ x: 2, y: 5, z: 4 });
 });
 
+test('applies the normalized depth-buffer transform for raw CPU depth data', () => {
+  const projectionMatrix = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+  const rawDepth = new Uint16Array([1000, 2000, 3000, 4000]).buffer;
+  const frame = {
+    getDepthInformation: () => ({
+      width: 2,
+      height: 2,
+      rawValueToMeters: 0.001,
+      depthDataFormat: 'unsigned-short',
+      data: rawDepth,
+      normDepthBufferFromNormView: { matrix: [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0.5, 0, 0, 1,
+      ] },
+    }),
+  };
+  const pose = { views: [{ projectionMatrix, transform: { matrix: projectionMatrix } }] };
+  const points = sampleDepthPointCloud(frame, pose, { sampleGrid: 4 });
+  expect(points).toHaveLength(25);
+  expect(points.some((point) => point.z === -4)).toBe(true);
+});
+
 test('voxel merges repeated depth samples and serializes a valid PLY', () => {
   const merged = mergePointCloud([{ x: 0, y: 0, z: 0, r: 1, g: 2, b: 3 }], [
     { x: 0.004, y: 0.003, z: 0.002, r: 4, g: 5, b: 6 },
@@ -92,4 +121,19 @@ test('incremental depth store confirms and then freezes stable markers', () => {
   const fourth = store.addPoints([{ x: 1.1, y: 2.1, z: 3.1 }]);
   expect(fourth.updatedMarkers).toHaveLength(0);
   expect(store.getMarkers()[0]).toMatchObject({ x: 1.0133333333333334, y: 2.013333333333333, z: 3.013333333333333 });
+});
+
+test('storage continues past the live render marker budget', () => {
+  const store = new IncrementalDepthStore({
+    markerConfirmationFrames: 1,
+    markerStabilizationFrames: 1,
+    maximumMarkers: 1,
+    maximumStoredMarkers: 8,
+  });
+  const result = store.addPoints([
+    { x: 0, y: 0, z: 0 },
+    { x: 1, y: 0, z: 0 },
+  ]);
+  expect(result.markerCount).toBe(2);
+  expect(store.getVisibleMarkers({ x: 0, y: 0, z: 0 }, 1)).toHaveLength(1);
 });

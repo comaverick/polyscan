@@ -31,14 +31,17 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
     let referenceSpace;
     const scanStore = new IncrementalDepthStore(WEBXR_DEPTH_OPTIONS);
     let lastPublishedAt = 0;
+    let lastMarkerRenderAt = 0;
     let lastDepthSampleAt = 0;
     let lastFrameTime = 0;
     let frameTimeAverage = 16.7;
     let lastQualityAdjustAt = 0;
     let sampleGrid = Math.max(12, Math.min(22, WEBXR_DEPTH_OPTIONS.sampleGrid));
     let sampleIntervalMs = 100;
+    let depthFrameCount = 0;
     let depthBatchCount = 0;
     let depthSampleCount = 0;
+    let emptyDepthBatchCount = 0;
 
     const updateGeometry = (addedPoints = []) => {
       if (!pointGeometry || !positionAttribute || !colorAttribute) return;
@@ -59,17 +62,28 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
       pointGeometry.setDrawRange(0, count);
     };
 
-    const updateMarkers = (THREE, addedMarkers = [], updatedMarkers = []) => {
-      if (!markerMesh || (!addedMarkers.length && !updatedMarkers.length)) return;
+    const updateMarkers = (THREE, markers = []) => {
+      if (!markerMesh) return;
       const matrix = new THREE.Matrix4();
-      [...addedMarkers, ...updatedMarkers].forEach((point) => {
-        matrix.makeTranslation(point.x, point.y, point.z);
-        markerMesh.setMatrixAt(point.index, matrix);
+      const position = new THREE.Vector3();
+      const normal = new THREE.Vector3();
+      const quaternion = new THREE.Quaternion();
+      const scale = new THREE.Vector3(1, 1, 1);
+      const defaultNormal = new THREE.Vector3(0, 0, 1);
+      markers.forEach((point, index) => {
+        position.set(point.x, point.y, point.z);
+        if (Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)
+          && Math.hypot(point.nx, point.ny, point.nz) > 0.5) {
+          normal.set(point.nx, point.ny, point.nz).normalize();
+          quaternion.setFromUnitVectors(defaultNormal, normal);
+        } else {
+          quaternion.identity();
+        }
+        matrix.compose(position, quaternion, scale);
+        markerMesh.setMatrixAt(index, matrix);
       });
-      markerMesh.count = scanStore.confirmedMarkerCount;
-      // Matrix updates are limited to confirmed/new markers. The old code
-      // rebuilt every marker matrix from every point on every XR frame.
-      markerMesh.instanceMatrix.needsUpdate = true;
+      markerMesh.count = markers.length;
+      markerMesh.instanceMatrix.needsUpdate = markers.length > 0;
     };
 
     const resize = () => {
@@ -115,21 +129,21 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
         pointGeometry.setAttribute('color', colorAttribute);
         pointGeometry.setDrawRange(0, 0);
         pointMaterial = new THREE.PointsMaterial({
-          size: 0.018,
+          size: 0.012,
           sizeAttenuation: true,
           vertexColors: true,
           transparent: true,
-          opacity: 0.92,
+          opacity: 0.24,
         });
         pointCloud = new THREE.Points(pointGeometry, pointMaterial);
         pointCloud.frustumCulled = false;
         scene.add(pointCloud);
-        const markerSize = WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.58;
-        markerGeometry = new THREE.BoxGeometry(markerSize, markerSize, Math.max(0.008, markerSize * 0.08));
+        const markerSize = WEBXR_DEPTH_OPTIONS.markerVoxelSize * 0.46;
+        markerGeometry = new THREE.BoxGeometry(markerSize, markerSize, Math.max(0.006, markerSize * 0.06));
         markerMaterial = new THREE.MeshBasicMaterial({
           color: 0x3db7ff,
           transparent: true,
-          opacity: 0.78,
+          opacity: 0.58,
           depthWrite: false,
         });
         markerMesh = new THREE.InstancedMesh(markerGeometry, markerMaterial, WEBXR_DEPTH_OPTIONS.maximumMarkers);
@@ -154,24 +168,34 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
             try { pose = frame.getViewerPose(referenceSpace); } catch { pose = null; }
             const processingStartedAt = performance.now();
             const freshPoints = pose ? sampleDepthPointCloud(frame, pose, { sampleGrid }) : [];
+            const result = scanStore.addPoints(freshPoints);
+            depthFrameCount += 1;
             if (freshPoints.length) {
-              const result = scanStore.addPoints(freshPoints);
               updateGeometry(result.addedPoints);
-              updateMarkers(THREE, result.addedMarkers, result.updatedMarkers);
               depthBatchCount += 1;
               depthSampleCount += freshPoints.length;
-              if (time - lastPublishedAt > 450) {
-                lastPublishedAt = time;
-                onPointCloud({
-                  points: result.points,
-                  pointCount: result.pointCount,
-                  markerCount: result.markerCount,
-                  depthBatchCount,
-                  depthSampleCount,
-                  sampleGrid,
-                  sampleIntervalMs,
-                });
-              }
+            } else {
+              emptyDepthBatchCount += 1;
+            }
+            const cameraPosition = pose?.views?.[0]?.transform?.position || { x: 0, y: 0, z: 0 };
+            if (time - lastMarkerRenderAt >= 300 || result.addedMarkers.length) {
+              lastMarkerRenderAt = time;
+              updateMarkers(THREE, scanStore.getVisibleMarkers(cameraPosition));
+            }
+            if (time - lastPublishedAt > 900) {
+              lastPublishedAt = time;
+              onPointCloud({
+                points: result.points,
+                pointCount: result.pointCount,
+                markerCount: result.markerCount,
+                depthFrameCount,
+                depthBatchCount,
+                depthSampleCount,
+                emptyDepthBatchCount,
+                storageCapacityReached: result.storageCapacityReached,
+                sampleGrid,
+                sampleIntervalMs,
+              });
             }
 
             const processingMs = performance.now() - processingStartedAt;
