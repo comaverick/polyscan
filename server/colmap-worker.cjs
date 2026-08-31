@@ -19,6 +19,35 @@ async function run(binary, args, options = {}) {
   }
 }
 
+function readPlyHeader(filename) {
+  if (!fs.existsSync(filename)) return { vertexCount: 0, faceCount: 0 };
+  const file = fs.openSync(filename, 'r');
+  try {
+    // PLY headers are small even for binary files. Reading a bounded prefix
+    // avoids loading a potentially large point cloud just to validate it.
+    const buffer = Buffer.alloc(256 * 1024);
+    const bytesRead = fs.readSync(file, buffer, 0, buffer.length, 0);
+    const header = buffer.toString('utf8', 0, bytesRead);
+    const vertexMatch = header.match(/\belement\s+vertex\s+(\d+)\b/i);
+    const faceMatch = header.match(/\belement\s+face\s+(\d+)\b/i);
+    return {
+      vertexCount: vertexMatch ? Number(vertexMatch[1]) : 0,
+      faceCount: faceMatch ? Number(faceMatch[1]) : 0,
+    };
+  } finally {
+    fs.closeSync(file);
+  }
+}
+
+function hasUsablePointCloud(filename) {
+  return readPlyHeader(filename).vertexCount > 0;
+}
+
+function hasUsableMesh(filename) {
+  const header = readPlyHeader(filename);
+  return header.vertexCount > 0 && header.faceCount > 0;
+}
+
 function existingAssets(captureDirectory, assets, kind) {
   return (assets || [])
     .filter((asset) => asset.kind === kind)
@@ -56,6 +85,7 @@ async function prepareImages({ captureDirectory, assets, workspace, onProgress }
 async function runDepthPipeline({ captureDirectory, assets, workspace, onProgress = () => {} }) {
   const [pointCloud] = existingAssets(captureDirectory, assets, 'pointcloud');
   if (!pointCloud) throw new Error('The depth scan did not include a point cloud asset.');
+  if (!hasUsablePointCloud(pointCloud.path)) throw new Error('The depth scan point cloud is empty.');
   fs.mkdirSync(workspace, { recursive: true });
   const modelPath = path.join(workspace, 'room.ply');
   const colmap = process.env.COLMAP_PATH || 'colmap';
@@ -65,7 +95,7 @@ async function runDepthPipeline({ captureDirectory, assets, workspace, onProgres
     // Poisson mesher is available. The uploaded PLY includes normals from the
     // browser depth grid, so this path does not need camera images.
     await run(colmap, ['poisson_mesher', '--input_path', pointCloud.path, '--output_path', modelPath], { cwd: workspace });
-    if (fs.existsSync(modelPath)) {
+    if (hasUsableMesh(modelPath)) {
       onProgress(100, 'Depth room mesh ready');
       return { modelPath, imageCount: 0, format: 'ply', kind: 'mesh', coordinateSystem: 'world' };
     }
@@ -73,6 +103,9 @@ async function runDepthPipeline({ captureDirectory, assets, workspace, onProgres
     // A raw point cloud remains a valid geometric preview when COLMAP is not
     // installed or cannot close an incomplete room surface.
   }
+  // Poisson can exit successfully while writing a zero-vertex (or
+  // zero-face) file when the measured surface is too sparse. Never expose
+  // that file to the viewer; the original measured cloud is still renderable.
   fs.copyFileSync(pointCloud.path, modelPath);
   onProgress(100, 'Depth point cloud ready');
   return { modelPath, imageCount: 0, format: 'ply', kind: 'pointcloud', pointSize: 0.018, coordinateSystem: 'world' };
@@ -142,18 +175,24 @@ async function runColmapPipeline({ captureDirectory, assets, workspace, onProgre
     // A dense fused cloud is still useful when Poisson cannot close a surface
     // (common with plain walls, glass, or a short phone capture). Returning it
     // lets the first-person viewer open instead of throwing away the build.
-    if (!fs.existsSync(fusedPath)) throw error;
+    if (!hasUsablePointCloud(fusedPath)) throw error;
     fs.copyFileSync(fusedPath, modelPath);
     onProgress(96, 'Surface mesh incomplete; preparing the scanned point cloud');
     return { modelPath, imageCount, format: 'ply', kind: 'pointcloud', pointSize: 0.022 };
   }
-  if (!fs.existsSync(modelPath)) {
-    if (!fs.existsSync(fusedPath)) throw new Error('COLMAP completed without producing a room model.');
+  if (!hasUsableMesh(modelPath)) {
+    if (!hasUsablePointCloud(fusedPath)) throw new Error('COLMAP completed without producing a usable room model.');
     fs.copyFileSync(fusedPath, modelPath);
+    onProgress(96, 'Surface mesh incomplete; preparing the scanned point cloud');
     return { modelPath, imageCount, format: 'ply', kind: 'pointcloud', pointSize: 0.022 };
   }
   onProgress(100, 'Room ready');
   return { modelPath, imageCount, format: 'ply', kind: 'mesh' };
 }
 
-module.exports = { runColmapPipeline };
+module.exports = {
+  runColmapPipeline,
+  readPlyHeader,
+  hasUsablePointCloud,
+  hasUsableMesh,
+};
