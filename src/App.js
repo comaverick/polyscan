@@ -1005,7 +1005,7 @@ function App() {
     activeScreen = <ProcessingScreen buildState={buildState} onOpenViewer={openViewer} onRetry={startBuild} onBack={backToReview} />;
   } else activeScreen = <RoomViewerScreen selectedKeyframes={selectedKeyframes} reconstruction={reconstruction} onBack={() => setScreen('review')} />;
 
-  return <div className="App">{activeScreen}</div>;
+  return <div className={`App${xrSession ? ' is-xr-scan' : ''}`}>{activeScreen}</div>;
 }
 
 export { App, RoomViewerScreen, ScanScreen, createEmptyScanState, isMobileScanDevice };

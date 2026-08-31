@@ -18,6 +18,12 @@ button { font: inherit; }
   color: var(--ink);
 }
 
+/* DOM overlay content is composited above the AR camera. Keep every full-
+   viewport wrapper transparent while WebXR supplies the passthrough. */
+.App.is-xr-scan,
+.App.is-xr-scan .scan-screen,
+.App.is-xr-scan .scan-preview-frame { background: transparent; }
+
 .launch-screen,
 .review-screen,
 .processing-screen,
