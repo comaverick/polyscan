@@ -6,6 +6,7 @@ import {
 } from './webxrDepth';
 
 const MAX_OCCLUSION_GRID_SIDE = 24;
+const OCCLUSION_EMPTY_GRACE_BATCHES = 3;
 
 function distanceBetween(a, b) {
   return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
@@ -34,7 +35,10 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
     let occlusionPositionAttribute;
     let occlusionIndexAttribute;
     let referenceSpace;
+    let referenceSpaceResetHandler;
     let lastMarkerSignature = '';
+    const markerSlotByKey = new Map();
+    const markerKeyBySlot = new Array(WEBXR_DEPTH_OPTIONS.maximumMarkers).fill(null);
     const scanStore = new IncrementalDepthStore(WEBXR_DEPTH_OPTIONS);
     const occlusionPositions = new Float32Array(MAX_OCCLUSION_GRID_SIDE * MAX_OCCLUSION_GRID_SIDE * 3);
     const occlusionIndices = new Uint16Array((MAX_OCCLUSION_GRID_SIDE - 1) * (MAX_OCCLUSION_GRID_SIDE - 1) * 6);
@@ -44,13 +48,18 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
     let lastFrameTime = 0;
     let frameTimeAverage = 16.7;
     let lastQualityAdjustAt = 0;
-    let sampleGrid = Math.max(14, Math.min(22, WEBXR_DEPTH_OPTIONS.sampleGrid));
+    // Keep the sampling lattice fixed. Changing its resolution while scanning
+    // changes which world points are revisited and makes the overlay appear to
+    // shuffle, even when tracking is good.
+    const sampleGrid = Math.max(14, Math.min(22, WEBXR_DEPTH_OPTIONS.sampleGrid));
     let sampleIntervalMs = 100;
     let depthFrameCount = 0;
     let depthBatchCount = 0;
     let depthSampleCount = 0;
     let emptyDepthBatchCount = 0;
     let consecutiveEmptyBatches = 0;
+    let occlusionEmptyBatches = 0;
+    let trackingResetGraceBatches = 0;
 
     const updateOcclusion = (surface) => {
       if (!occlusionGeometry || !occlusionPositionAttribute || !occlusionIndexAttribute) return;
@@ -101,19 +110,34 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
 
     const updateMarkers = (THREE, markers = [], cameraPosition = {}) => {
       if (!markerMesh) return;
-      // A marker's key and revision are stable while the camera is still. Do
-      // not rewrite every instance just because an XR frame was rendered.
-      const signature = markers.map((point) => `${point.key || point.index}:${point.revision || 0}`).join(',');
+      // Sort only for the update pass. The actual GPU slot is assigned once
+      // per marker key below, so camera movement cannot reorder visible dots.
+      const orderedMarkers = [...markers].sort((a, b) => String(a.key || a.index).localeCompare(String(b.key || b.index)));
+      const signature = orderedMarkers.map((point) => `${point.key || point.index}:${point.revision || 0}`).join(',');
       if (signature === lastMarkerSignature) return;
       lastMarkerSignature = signature;
       const matrix = new THREE.Matrix4();
+      const hiddenMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
       const position = new THREE.Vector3();
       const normal = new THREE.Vector3();
       const fallbackNormal = new THREE.Vector3();
       const quaternion = new THREE.Quaternion();
       const scale = new THREE.Vector3(1, 1, 1);
       const defaultNormal = new THREE.Vector3(0, 0, 1);
-      markers.forEach((point, index) => {
+      const visibleSlots = new Set();
+      const currentKeys = new Set(orderedMarkers.map((point) => String(point.key || point.index)));
+      orderedMarkers.forEach((point) => {
+        const key = String(point.key || point.index);
+        let slot = markerSlotByKey.get(key);
+        if (slot === undefined) {
+          slot = markerKeyBySlot.findIndex((slotKey) => !slotKey || !currentKeys.has(slotKey));
+          if (slot < 0) return;
+          const previousKey = markerKeyBySlot[slot];
+          if (previousKey) markerSlotByKey.delete(previousKey);
+          markerSlotByKey.set(key, slot);
+          markerKeyBySlot[slot] = key;
+        }
+        visibleSlots.add(slot);
         position.set(point.x, point.y, point.z);
         if (Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)
           && Math.hypot(point.nx, point.ny, point.nz) > 0.5) {
@@ -131,10 +155,13 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
         // current-frame occlusion mesh does not z-fight with an anchored mark.
         position.addScaledVector(normal, 0.003);
         matrix.compose(position, quaternion, scale);
-        markerMesh.setMatrixAt(index, matrix);
+        markerMesh.setMatrixAt(slot, matrix);
       });
-      markerMesh.count = markers.length;
-      markerMesh.instanceMatrix.needsUpdate = markers.length > 0;
+      for (let slot = 0; slot < markerKeyBySlot.length; slot += 1) {
+        if (markerKeyBySlot[slot] && !visibleSlots.has(slot)) markerMesh.setMatrixAt(slot, hiddenMatrix);
+      }
+      markerMesh.count = markerKeyBySlot.length;
+      markerMesh.instanceMatrix.needsUpdate = true;
     };
 
     const resize = () => {
@@ -163,6 +190,21 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
         await renderer.xr.setSession(session);
         referenceSpace = renderer.xr.getReferenceSpace?.() || await session.requestReferenceSpace('local');
         if (cancelled) return;
+
+        referenceSpaceResetHandler = (event) => {
+          // WebXR supplies the transform between the old and new local
+          // origins. Rebase the stored map before accepting new samples so a
+          // relocalization does not leave old and new dots in different rooms.
+          const rebased = scanStore.applyReferenceSpaceReset(event?.transform);
+          if (!rebased) scanStore.clearMap();
+          trackingResetGraceBatches = 2;
+          // Force the next marker pass to hide/rewrite every slot, including
+          // the case where the map was cleared and the visible list is empty.
+          lastMarkerSignature = '__reference-space-reset__';
+          occlusionEmptyBatches = OCCLUSION_EMPTY_GRACE_BATCHES;
+          updateOcclusion({ gridSide: 0, gridPoints: [] });
+        };
+        referenceSpace?.addEventListener?.('reset', referenceSpaceResetHandler);
 
         const scene = new THREE.Scene();
         const camera = new THREE.PerspectiveCamera();
@@ -219,7 +261,11 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
           side: THREE.DoubleSide,
         });
         markerMesh = new THREE.InstancedMesh(markerGeometry, markerMaterial, WEBXR_DEPTH_OPTIONS.maximumMarkers);
-        markerMesh.count = 0;
+        const hiddenMarkerMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
+        for (let slot = 0; slot < WEBXR_DEPTH_OPTIONS.maximumMarkers; slot += 1) {
+          markerMesh.setMatrixAt(slot, hiddenMarkerMatrix);
+        }
+        markerMesh.count = WEBXR_DEPTH_OPTIONS.maximumMarkers;
         markerMesh.frustumCulled = false;
         markerMesh.renderOrder = 2;
         markerMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -239,22 +285,27 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
             let pose = null;
             try { pose = frame.getViewerPose(referenceSpace); } catch { pose = null; }
             const processingStartedAt = performance.now();
-            const samplePhase = scanStore.batchNumber % 4;
             const surface = pose
-              ? sampleDepthSurface(frame, pose, { sampleGrid, samplePhase })
+              ? sampleDepthSurface(frame, pose, { sampleGrid, samplePhase: 0 })
               : { points: [], gridPoints: [], gridSide: 0 };
             const freshPoints = surface.points;
-            const result = scanStore.addPoints(freshPoints);
+            const recoveringTracking = trackingResetGraceBatches > 0;
+            if (recoveringTracking) trackingResetGraceBatches -= 1;
+            const result = scanStore.addPoints(recoveringTracking ? [] : freshPoints);
             depthFrameCount += 1;
-            if (freshPoints.length) {
+            if (freshPoints.length && !recoveringTracking) {
               updateOcclusion(surface);
+              occlusionEmptyBatches = 0;
               depthBatchCount += 1;
               depthSampleCount += freshPoints.length;
               consecutiveEmptyBatches = 0;
             } else {
               emptyDepthBatchCount += 1;
               consecutiveEmptyBatches += 1;
-              updateOcclusion({ gridSide: 0, gridPoints: [] });
+              occlusionEmptyBatches += 1;
+              if (occlusionEmptyBatches >= OCCLUSION_EMPTY_GRACE_BATCHES) {
+                updateOcclusion({ gridSide: 0, gridPoints: [] });
+              }
             }
             const cameraPosition = pose?.views?.[0]?.transform?.position || { x: 0, y: 0, z: 0 };
             if (time - lastMarkerRenderAt >= 300 || result.addedMarkers.length || result.updatedMarkers.length) {
@@ -286,10 +337,8 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
               const underBudget = frameTimeAverage < 18 && processingMs < 10;
               if (overloaded) {
                 sampleIntervalMs = Math.min(180, sampleIntervalMs + 20);
-                sampleGrid = Math.max(14, sampleGrid - 2);
               } else if (underBudget) {
                 sampleIntervalMs = Math.max(90, sampleIntervalMs - 10);
-                sampleGrid = Math.min(22, sampleGrid + 1);
               }
             }
           }
@@ -304,6 +353,7 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
     return () => {
       cancelled = true;
       renderer?.setAnimationLoop(null);
+      referenceSpace?.removeEventListener?.('reset', referenceSpaceResetHandler);
       resizeObserver?.disconnect();
       occlusionGeometry?.dispose();
       occlusionMaterial?.dispose();

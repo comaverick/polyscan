@@ -152,6 +152,33 @@ test('fuses repeated readings instead of preserving a noisy first sample', () =>
   expect(store.getPoints()[0].z).toBeCloseTo(2.005, 4);
 });
 
+test('locks settled markers and ignores a later far depth spike', () => {
+  const store = new IncrementalDepthStore({
+    markerConfirmationFrames: 1,
+    markerStabilizationFrames: 2,
+    markerLockedMatchDistance: 0.04,
+  });
+  store.addPoints([{ x: 0, y: 0, z: 2 }]);
+  store.addPoints([{ x: 0.02, y: 0, z: 2 }]);
+  store.addPoints([{ x: 0.08, y: 0, z: 2 }]);
+  expect(store.getMarkers()).toHaveLength(1);
+  expect(store.getMarkers()[0].x).toBeCloseTo(0.01, 4);
+});
+
+test('rebases stored points and markers when the XR origin resets', () => {
+  const store = new IncrementalDepthStore({ markerConfirmationFrames: 1 });
+  store.addPoints([{ x: 1, y: 2, z: 3 }]);
+  const translation = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    4, 5, 6, 1,
+  ];
+  expect(store.applyReferenceSpaceReset({ matrix: translation })).toBe(true);
+  expect(store.getPoints()[0]).toMatchObject({ x: 5, y: 7, z: 9 });
+  expect(store.getMarkers()[0]).toMatchObject({ x: 5, y: 7, z: 9 });
+});
+
 test('does not bridge a depth discontinuity when estimating normals', () => {
   const projectionMatrix = [
     1, 0, 0, 0,

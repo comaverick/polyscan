@@ -7,10 +7,16 @@ const DEFAULT_OPTIONS = Object.freeze({
   markerVoxelSize: 0.08,
   maximumMarkers: 6000,
   maximumStoredMarkers: 100000,
-  markerConfirmationFrames: 1,
-  markerStabilizationFrames: 8,
+  // A single depth reading is too noisy to use as a visible surface mark.
+  // Requiring a few batches also lets the initial position settle before the
+  // marker is made visible.
+  markerConfirmationFrames: 3,
+  markerStabilizationFrames: 4,
   markerMergeDistance: 0.11,
+  markerLockedMatchDistance: 0.045,
+  markerNormalThreshold: 0.45,
   pointMergeDistance: 0.065,
+  pointUpdateMaxDistance: 0.08,
   markerMatchCellSize: 0.2,
   visibilityCellSize: 2,
 });
@@ -97,6 +103,15 @@ function transformPoint(matrix, point) {
     y: (matrix[1] * x + matrix[5] * y + matrix[9] * z + matrix[13]) / w,
     z: (matrix[2] * x + matrix[6] * y + matrix[10] * z + matrix[14]) / w,
   };
+}
+
+function transformDirection(matrix, vector) {
+  if (!matrix || matrix.length < 16 || !vector) return null;
+  return normalizeVector(
+    matrix[0] * vector.x + matrix[4] * vector.y + matrix[8] * vector.z,
+    matrix[1] * vector.x + matrix[5] * vector.y + matrix[9] * vector.z,
+    matrix[2] * vector.x + matrix[6] * vector.y + matrix[10] * vector.z,
+  );
 }
 
 function createDepthReader(depthInfo) {
@@ -346,8 +361,117 @@ export class IncrementalDepthStore {
     else cellMap.set(key, [value]);
   }
 
+  moveIndexedValue(cellMap, value, oldPosition, cellSize) {
+    const oldKey = spatialCellKey(oldPosition, cellSize);
+    const newKey = spatialCellKey(value, cellSize);
+    if (oldKey === newKey) return;
+    const oldBucket = cellMap.get(oldKey);
+    if (oldBucket) {
+      const nextBucket = oldBucket.filter((candidate) => candidate !== value);
+      if (nextBucket.length) cellMap.set(oldKey, nextBucket);
+      else cellMap.delete(oldKey);
+    }
+    this.addToCell(cellMap, value, cellSize, value);
+  }
+
+  rebuildSpatialIndexes() {
+    this.voxels.clear();
+    this.pointCells.clear();
+    this.markerMatchCells.clear();
+    this.markerVisibilityCells.clear();
+    this.pointRecords.forEach((record) => {
+      this.voxels.set(voxelKey(record, this.settings.voxelSize), record.index);
+      this.addToCell(this.pointCells, record, this.settings.voxelSize, record);
+    });
+    this.markers.forEach((marker) => {
+      this.addToCell(this.markerMatchCells, marker, this.settings.markerMatchCellSize, marker);
+      this.addToCell(this.markerVisibilityCells, marker, this.settings.visibilityCellSize, marker);
+    });
+  }
+
+  /**
+   * Rebase the accumulated map when WebXR changes the local reference-space
+   * origin. Without this, a relocalization moves new depth samples while old
+   * markers remain in the previous coordinate system.
+   */
+  applyReferenceSpaceReset(transform) {
+    const matrix = transform?.matrix || transform;
+    if (!matrix || matrix.length < 16) return false;
+    this.points.forEach((point) => {
+      const normal = transformDirection(matrix, {
+        x: point.nx,
+        y: point.ny,
+        z: point.nz,
+      });
+      const next = transformPoint(matrix, point);
+      if (next) {
+        point.x = next.x;
+        point.y = next.y;
+        point.z = next.z;
+      }
+      if (normal) {
+        point.nx = normal.x;
+        point.ny = normal.y;
+        point.nz = normal.z;
+      }
+    });
+    this.pointRecords.forEach((record) => {
+      const normal = transformDirection(matrix, {
+        x: record.nx,
+        y: record.ny,
+        z: record.nz,
+      });
+      const next = transformPoint(matrix, record);
+      if (next) {
+        record.x = next.x;
+        record.y = next.y;
+        record.z = next.z;
+      }
+      if (normal) {
+        record.nx = normal.x;
+        record.ny = normal.y;
+        record.nz = normal.z;
+      }
+    });
+    this.markers.forEach((marker) => {
+      const normal = transformDirection(matrix, {
+        x: marker.nx,
+        y: marker.ny,
+        z: marker.nz,
+      });
+      const next = transformPoint(matrix, marker);
+      if (next) {
+        marker.x = next.x;
+        marker.y = next.y;
+        marker.z = next.z;
+      }
+      if (normal) {
+        marker.nx = normal.x;
+        marker.ny = normal.y;
+        marker.nz = normal.z;
+      }
+    });
+    this.rebuildSpatialIndexes();
+    return true;
+  }
+
+  clearMap() {
+    this.voxels.clear();
+    this.pointCells.clear();
+    this.pointRecords = [];
+    this.markers.clear();
+    this.markerMatchCells.clear();
+    this.markerVisibilityCells.clear();
+    this.points = [];
+    this.confirmedMarkerCount = 0;
+    this.storageCapacityReached = false;
+    this.pointCapacityReached = false;
+    this.batchNumber = 0;
+  }
+
   updatePoint(existing, point) {
     const current = this.points[existing.index];
+    const previousPosition = { x: current.x, y: current.y, z: current.z };
     existing.observations += 1;
     // Use a quick average while a point is settling, then a slow running
     // average. This removes one-frame depth spikes without making revisits
@@ -374,6 +498,7 @@ export class IncrementalDepthStore {
     existing.nx = current.nx;
     existing.ny = current.ny;
     existing.nz = current.nz;
+    this.moveIndexedValue(this.pointCells, existing, previousPosition, this.settings.voxelSize);
     existing.revision += 1;
     return current;
   }
@@ -398,7 +523,18 @@ export class IncrementalDepthStore {
         0.25,
       );
       if (existingPoint) {
-        updatedPoints.push({ point: this.updatePoint(existingPoint, point), index: existingPoint.index });
+        const currentPoint = this.points[existingPoint.index];
+        const pointDistance = Math.hypot(
+          currentPoint.x - point.x,
+          currentPoint.y - point.y,
+          currentPoint.z - point.z,
+        );
+        // Keep one-frame depth spikes out of the long-lived cloud. A point
+        // may settle while it is new, but a mature point must stay near its
+        // original surface or be ignored for this batch.
+        if (existingPoint.observations < 8 || pointDistance <= this.settings.pointUpdateMaxDistance) {
+          updatedPoints.push({ point: this.updatePoint(existingPoint, point), index: existingPoint.index });
+        }
       } else if (this.points.length < this.settings.maximumPoints) {
         const stablePoint = {
           x: point.x,
@@ -428,7 +564,7 @@ export class IncrementalDepthStore {
         point,
         this.settings.markerMatchCellSize,
         this.settings.markerMergeDistance,
-        0.35,
+        this.settings.markerNormalThreshold,
       );
       if (!marker) {
         if (this.markers.size >= this.settings.maximumStoredMarkers) {
@@ -448,6 +584,7 @@ export class IncrementalDepthStore {
           ny: point.ny ?? 0,
           nz: point.nz ?? 0,
           confirmed: false,
+          locked: false,
           revision: 0,
           lastSeenBatch: 0,
         };
@@ -461,13 +598,32 @@ export class IncrementalDepthStore {
       // not the number of neighboring pixels in a single frame.
       if (seenMarkers.has(marker.key)) return;
       seenMarkers.add(marker.key);
+
+      // Once a surfel has settled, a far-away reading is almost always a
+      // depth outlier or a nearby surface crossing the match radius. Keep the
+      // existing marker fixed instead of dragging it toward that reading.
+      const lockedDistance = Math.hypot(
+        marker.x - point.x,
+        marker.y - point.y,
+        marker.z - point.z,
+      );
+      if (marker.locked && lockedDistance > this.settings.markerLockedMatchDistance) {
+        marker.lastSeenBatch = this.batchNumber;
+        return;
+      }
+
+      const previousPosition = { x: marker.x, y: marker.y, z: marker.z };
       marker.observations += 1;
       marker.confidence = Math.min(1, marker.confidence + 0.22);
+      const stabilizationFrames = Math.max(1, Math.round(this.settings.markerStabilizationFrames));
+      const canMove = !marker.locked && marker.observations <= stabilizationFrames;
       const alpha = marker.observations <= 8 ? 1 / marker.observations : 0.06;
-      marker.x += (point.x - marker.x) * alpha;
-      marker.y += (point.y - marker.y) * alpha;
-      marker.z += (point.z - marker.z) * alpha;
-      if (Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)) {
+      if (canMove) {
+        marker.x += (point.x - marker.x) * alpha;
+        marker.y += (point.y - marker.y) * alpha;
+        marker.z += (point.z - marker.z) * alpha;
+      }
+      if (canMove && Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)) {
         const normal = normalizeVector(
           marker.nx * (1 - alpha) + point.nx * alpha,
           marker.ny * (1 - alpha) + point.ny * alpha,
@@ -479,8 +635,26 @@ export class IncrementalDepthStore {
           marker.nz = normal.z;
         }
       }
+      if (marker.observations >= stabilizationFrames) marker.locked = true;
       marker.lastSeenBatch = this.batchNumber;
-      marker.revision += 1;
+      const moved = Math.hypot(
+        marker.x - previousPosition.x,
+        marker.y - previousPosition.y,
+        marker.z - previousPosition.z,
+      ) > 0.00001;
+      if (moved || !marker.confirmed) marker.revision += 1;
+      this.moveIndexedValue(
+        this.markerMatchCells,
+        marker,
+        previousPosition,
+        this.settings.markerMatchCellSize,
+      );
+      this.moveIndexedValue(
+        this.markerVisibilityCells,
+        marker,
+        previousPosition,
+        this.settings.visibilityCellSize,
+      );
 
       const markerPoint = {
         key: marker.key,
