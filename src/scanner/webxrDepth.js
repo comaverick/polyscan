@@ -2,13 +2,17 @@ const DEFAULT_OPTIONS = Object.freeze({
   sampleGrid: 20,
   minimumDepth: 0.2,
   maximumDepth: 12,
-  voxelSize: 0.04,
+  voxelSize: 0.05,
   maximumPoints: 180000,
   markerVoxelSize: 0.08,
   maximumMarkers: 6000,
   maximumStoredMarkers: 100000,
-  markerConfirmationFrames: 2,
-  markerStabilizationFrames: 3,
+  markerConfirmationFrames: 1,
+  markerStabilizationFrames: 8,
+  markerMergeDistance: 0.11,
+  pointMergeDistance: 0.065,
+  markerMatchCellSize: 0.2,
+  visibilityCellSize: 2,
 });
 
 function isFinitePoint(point) {
@@ -27,6 +31,23 @@ function normalizeVector(x, y, z) {
   const length = Math.hypot(x, y, z);
   if (!Number.isFinite(length) || length < 0.000001) return null;
   return { x: x / length, y: y / length, z: z / length };
+}
+
+function stableHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < String(value).length; index += 1) {
+    hash ^= String(value).charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function spatialCellKey(point, cellSize) {
+  return [
+    Math.floor(point.x / cellSize),
+    Math.floor(point.y / cellSize),
+    Math.floor(point.z / cellSize),
+  ].join('|');
 }
 
 function transformNormalizedDepthCoordinates(matrix, x, y) {
@@ -117,16 +138,17 @@ function createDepthReader(depthInfo) {
  * space. The camera pose comes from WebXR, so returning to a surface keeps the
  * same world coordinates rather than redrawing a screen-space sticker.
  */
-export function sampleDepthPointCloud(frame, pose, options = {}) {
+export function sampleDepthSurface(frame, pose, options = {}) {
   const settings = { ...DEFAULT_OPTIONS, ...options };
   const points = [];
   const view = pose?.views?.[0];
-  if (!frame || !view || typeof frame.getDepthInformation !== 'function') return points;
+  const emptySurface = { points, gridPoints: [], gridSide: 0, step: 0, cameraPosition: { x: 0, y: 0, z: 0 } };
+  if (!frame || !view || typeof frame.getDepthInformation !== 'function') return emptySurface;
   let depthInfo;
   try {
     depthInfo = frame.getDepthInformation(view);
   } catch {
-    return points;
+    return emptySurface;
   }
   // XRView.transform places the view in the requested reference space. Its
   // inverse is the view matrix (world -> camera), which is the opposite of
@@ -134,21 +156,25 @@ export function sampleDepthPointCloud(frame, pose, options = {}) {
   const viewToWorld = view.transform?.matrix;
   const depthTransform = depthInfo?.transform?.matrix || viewToWorld;
   const projection = depthInfo?.projectionMatrix || view.projectionMatrix;
-  if (!depthInfo || !depthTransform || !projection) return points;
+  if (!depthInfo || !depthTransform || !projection) return emptySurface;
   const readDepth = createDepthReader(depthInfo);
-  if (!readDepth) return points;
+  if (!readDepth) return emptySurface;
   const step = Math.max(4, Math.round(settings.sampleGrid));
   const rowSize = step + 1;
   const depths = new Float32Array(rowSize * rowSize);
   const worldPoints = new Array(rowSize * rowSize);
+  const phase = ((Math.trunc(settings.samplePhase || 0) % 4) + 4) % 4;
+  const xOffset = phase === 1 || phase === 3 ? 0.45 : 0;
+  const yOffset = phase === 2 || phase === 3 ? 0.45 : 0;
+  const sampleCoordinate = (index, offset) => Math.min(1, Math.max(0, (index + offset) / step));
 
   // Read each depth sample once, then reuse it for point and normal
   // estimation. This keeps neighboring surface samples coherent without
   // multiplying calls into the device depth provider.
   for (let row = 0; row <= step; row += 1) {
-    const y = row / step;
+    const y = sampleCoordinate(row, yOffset);
     for (let column = 0; column <= step; column += 1) {
-      const x = column / step;
+      const x = sampleCoordinate(column, xOffset);
       const depth = readDepth(x, y);
       if (!Number.isFinite(depth) || depth < settings.minimumDepth || depth > settings.maximumDepth) continue;
       depths[row * rowSize + column] = depth;
@@ -156,11 +182,11 @@ export function sampleDepthPointCloud(frame, pose, options = {}) {
   }
 
   for (let row = 0; row <= step; row += 1) {
-    const y = row / step;
+    const y = sampleCoordinate(row, yOffset);
     for (let column = 0; column <= step; column += 1) {
       const depth = depths[row * rowSize + column];
       if (!depth) continue;
-      const x = column / step;
+      const x = sampleCoordinate(column, xOffset);
       // WebXR projection matrices are column-major. Depth is measured along
       // the view's optical axis, so unproject the normalized sample at -depth.
       // For a perspective matrix, NDC = -(focal * viewCoordinate / z) -
@@ -185,13 +211,21 @@ export function sampleDepthPointCloud(frame, pose, options = {}) {
       const index = row * rowSize + column;
       const worldPoint = worldPoints[index];
       if (!worldPoint) continue;
+      const depth = depths[index];
       const rightIndex = row * rowSize + (column < step ? column + 1 : column - 1);
       const downIndex = (row < step ? row + 1 : row - 1) * rowSize + column;
       const right = worldPoints[rightIndex];
       const down = worldPoints[downIndex];
       let normal = null;
-      if (right && down && Math.hypot(right.x - worldPoint.x, right.y - worldPoint.y, right.z - worldPoint.z) < 0.65
-        && Math.hypot(down.x - worldPoint.x, down.y - worldPoint.y, down.z - worldPoint.z) < 0.65) {
+      const rightDepth = depths[rightIndex];
+      const downDepth = depths[downIndex];
+      const maxDepthJump = Math.max(0.08, Math.min(0.28, depth * 0.1));
+      const rightGap = right ? Math.hypot(right.x - worldPoint.x, right.y - worldPoint.y, right.z - worldPoint.z) : Infinity;
+      const downGap = down ? Math.hypot(down.x - worldPoint.x, down.y - worldPoint.y, down.z - worldPoint.z) : Infinity;
+      if (right && down && rightDepth && downDepth
+        && Math.abs(rightDepth - depth) <= maxDepthJump
+        && Math.abs(downDepth - depth) <= maxDepthJump
+        && rightGap <= 0.28 && downGap <= 0.28) {
         const edgeX = { x: right.x - worldPoint.x, y: right.y - worldPoint.y, z: right.z - worldPoint.z };
         const edgeY = { x: down.x - worldPoint.x, y: down.y - worldPoint.y, z: down.z - worldPoint.z };
         normal = normalizeVector(
@@ -219,7 +253,17 @@ export function sampleDepthPointCloud(frame, pose, options = {}) {
       });
     }
   }
-  return points;
+  return {
+    points,
+    gridPoints: worldPoints,
+    gridSide: rowSize,
+    step,
+    cameraPosition,
+  };
+}
+
+export function sampleDepthPointCloud(frame, pose, options = {}) {
+  return sampleDepthSurface(frame, pose, options).points;
 }
 
 export function mergePointCloud(previousPoints = [], nextPoints = [], options = {}) {
@@ -247,26 +291,115 @@ export class IncrementalDepthStore {
   constructor(options = {}) {
     this.settings = { ...DEFAULT_OPTIONS, ...options };
     this.voxels = new Map();
+    this.pointCells = new Map();
+    this.pointRecords = [];
     this.markers = new Map();
+    this.markerMatchCells = new Map();
+    this.markerVisibilityCells = new Map();
     this.points = [];
     this.confirmedMarkerCount = 0;
     this.storageCapacityReached = false;
-    this.renderCursor = 0;
+    this.pointCapacityReached = false;
+    this.batchNumber = 0;
+  }
+
+  findNearest(cellMap, point, cellSize, maxDistance, normalThreshold = -1) {
+    const centerX = Math.floor(point.x / cellSize);
+    const centerY = Math.floor(point.y / cellSize);
+    const centerZ = Math.floor(point.z / cellSize);
+    const maxDistanceSquared = maxDistance * maxDistance;
+    let nearest = null;
+    let nearestDistance = maxDistanceSquared;
+    for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetZ = -1; offsetZ <= 1; offsetZ += 1) {
+          const bucket = cellMap.get(`${centerX + offsetX}|${centerY + offsetY}|${centerZ + offsetZ}`);
+          if (!bucket) continue;
+          for (let candidateIndex = 0; candidateIndex < bucket.length; candidateIndex += 1) {
+            const candidate = bucket[candidateIndex];
+            const dx = candidate.x - point.x;
+            const dy = candidate.y - point.y;
+            const dz = candidate.z - point.z;
+            const distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (distanceSquared >= nearestDistance) continue;
+            if (normalThreshold >= 0
+              && Number.isFinite(candidate.nx) && Number.isFinite(candidate.ny) && Number.isFinite(candidate.nz)
+              && Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)
+              && Math.hypot(candidate.nx, candidate.ny, candidate.nz) > 0.5
+              && Math.hypot(point.nx, point.ny, point.nz) > 0.5) {
+              const dot = candidate.nx * point.nx + candidate.ny * point.ny + candidate.nz * point.nz;
+              if (dot < normalThreshold) continue;
+            }
+            nearest = candidate;
+            nearestDistance = distanceSquared;
+          }
+        }
+      }
+    }
+    return nearest;
+  }
+
+  addToCell(cellMap, point, cellSize, value) {
+    const key = spatialCellKey(point, cellSize);
+    const bucket = cellMap.get(key);
+    if (bucket) bucket.push(value);
+    else cellMap.set(key, [value]);
+  }
+
+  updatePoint(existing, point) {
+    const current = this.points[existing.index];
+    existing.observations += 1;
+    // Use a quick average while a point is settling, then a slow running
+    // average. This removes one-frame depth spikes without making revisits
+    // visibly slide across the room.
+    const alpha = existing.observations <= 8 ? 1 / existing.observations : 0.06;
+    current.x += (point.x - current.x) * alpha;
+    current.y += (point.y - current.y) * alpha;
+    current.z += (point.z - current.z) * alpha;
+    if (Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)) {
+      const normal = normalizeVector(
+        (current.nx || 0) * (1 - alpha) + point.nx * alpha,
+        (current.ny || 0) * (1 - alpha) + point.ny * alpha,
+        (current.nz || 0) * (1 - alpha) + point.nz * alpha,
+      );
+      if (normal) {
+        current.nx = normal.x;
+        current.ny = normal.y;
+        current.nz = normal.z;
+      }
+    }
+    existing.x = current.x;
+    existing.y = current.y;
+    existing.z = current.z;
+    existing.nx = current.nx;
+    existing.ny = current.ny;
+    existing.nz = current.nz;
+    existing.revision += 1;
+    return current;
   }
 
   addPoints(nextPoints = []) {
     const addedPoints = [];
+    const updatedPoints = [];
     const addedMarkers = [];
     const updatedMarkers = [];
-    const seenMarkerKeys = new Set();
+    const seenMarkers = new Set();
     const confirmationFrames = Math.max(1, Math.round(this.settings.markerConfirmationFrames));
-    const stabilizationFrames = Math.max(confirmationFrames, Math.round(this.settings.markerStabilizationFrames));
+    this.batchNumber += 1;
 
     nextPoints.forEach((point) => {
       if (!isFinitePoint(point)) return;
 
-      const pointKey = voxelKey(point, this.settings.voxelSize);
-      if (!this.voxels.has(pointKey) && this.points.length < this.settings.maximumPoints) {
+      const existingPoint = this.findNearest(
+        this.pointCells,
+        point,
+        this.settings.voxelSize,
+        this.settings.pointMergeDistance,
+        0.25,
+      );
+      if (existingPoint) {
+        updatedPoints.push({ point: this.updatePoint(existingPoint, point), index: existingPoint.index });
+      } else if (this.points.length < this.settings.maximumPoints) {
         const stablePoint = {
           x: point.x,
           y: point.y,
@@ -279,33 +412,35 @@ export class IncrementalDepthStore {
           b: point.b ?? 255,
         };
         const index = this.points.length;
+        const pointKey = voxelKey(stablePoint, this.settings.voxelSize);
         this.voxels.set(pointKey, index);
         this.points.push(stablePoint);
+        const pointRecord = { index, x: stablePoint.x, y: stablePoint.y, z: stablePoint.z, nx: stablePoint.nx, ny: stablePoint.ny, nz: stablePoint.nz, observations: 1, revision: 1 };
+        this.pointRecords.push(pointRecord);
+        this.addToCell(this.pointCells, pointRecord, this.settings.voxelSize, pointRecord);
         addedPoints.push({ point: stablePoint, index });
+      } else {
+        this.pointCapacityReached = true;
       }
 
-      const markerKey = voxelKey(point, this.settings.markerVoxelSize);
-      if (seenMarkerKeys.has(markerKey)) return;
-      seenMarkerKeys.add(markerKey);
-
-      let marker = this.markers.get(markerKey);
+      let marker = this.findNearest(
+        this.markerMatchCells,
+        point,
+        this.settings.markerMatchCellSize,
+        this.settings.markerMergeDistance,
+        0.35,
+      );
       if (!marker) {
-        // Keep a small candidate buffer, but only confirmed markers receive a
-        // render index. This prevents unconfirmed candidates from creating
-        // gaps in InstancedMesh's contiguous draw range.
         if (this.markers.size >= this.settings.maximumStoredMarkers) {
           this.storageCapacityReached = true;
           return;
         }
+        const markerKey = `${voxelKey(point, this.settings.markerVoxelSize)}:${this.markers.size}`;
         marker = {
+          key: markerKey,
           index: null,
-          count: 0,
-          sumX: 0,
-          sumY: 0,
-          sumZ: 0,
-          sumNX: 0,
-          sumNY: 0,
-          sumNZ: 0,
+          observations: 0,
+          confidence: 0,
           x: point.x,
           y: point.y,
           z: point.z,
@@ -313,33 +448,42 @@ export class IncrementalDepthStore {
           ny: point.ny ?? 0,
           nz: point.nz ?? 0,
           confirmed: false,
-          frozen: false,
+          revision: 0,
+          lastSeenBatch: 0,
         };
-        this.markers.set(markerKey, marker);
+        this.markers.set(marker.key, marker);
+        this.addToCell(this.markerMatchCells, marker, this.settings.markerMatchCellSize, marker);
+        this.addToCell(this.markerVisibilityCells, marker, this.settings.visibilityCellSize, marker);
       }
-      if (marker.frozen) return;
 
-      marker.count += 1;
-      marker.sumX += point.x;
-      marker.sumY += point.y;
-      marker.sumZ += point.z;
+      // A dense depth grid can hit one coarse surfel many times in one batch.
+      // Count one observation per depth batch so confirmation represents time,
+      // not the number of neighboring pixels in a single frame.
+      if (seenMarkers.has(marker.key)) return;
+      seenMarkers.add(marker.key);
+      marker.observations += 1;
+      marker.confidence = Math.min(1, marker.confidence + 0.22);
+      const alpha = marker.observations <= 8 ? 1 / marker.observations : 0.06;
+      marker.x += (point.x - marker.x) * alpha;
+      marker.y += (point.y - marker.y) * alpha;
+      marker.z += (point.z - marker.z) * alpha;
       if (Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)) {
-        marker.sumNX += point.nx;
-        marker.sumNY += point.ny;
-        marker.sumNZ += point.nz;
+        const normal = normalizeVector(
+          marker.nx * (1 - alpha) + point.nx * alpha,
+          marker.ny * (1 - alpha) + point.ny * alpha,
+          marker.nz * (1 - alpha) + point.nz * alpha,
+        );
+        if (normal) {
+          marker.nx = normal.x;
+          marker.ny = normal.y;
+          marker.nz = normal.z;
+        }
       }
-      const sampleCount = Math.min(marker.count, stabilizationFrames);
-      marker.x = marker.sumX / sampleCount;
-      marker.y = marker.sumY / sampleCount;
-      marker.z = marker.sumZ / sampleCount;
-      const normal = normalizeVector(marker.sumNX, marker.sumNY, marker.sumNZ);
-      if (normal) {
-        marker.nx = normal.x;
-        marker.ny = normal.y;
-        marker.nz = normal.z;
-      }
+      marker.lastSeenBatch = this.batchNumber;
+      marker.revision += 1;
 
       const markerPoint = {
+        key: marker.key,
         x: marker.x,
         y: marker.y,
         z: marker.z,
@@ -347,8 +491,9 @@ export class IncrementalDepthStore {
         ny: marker.ny,
         nz: marker.nz,
         index: marker.index,
+        revision: marker.revision,
       };
-      if (!marker.confirmed && marker.count >= confirmationFrames) {
+      if (!marker.confirmed && marker.observations >= confirmationFrames) {
         marker.confirmed = true;
         marker.index = this.confirmedMarkerCount;
         this.confirmedMarkerCount += 1;
@@ -356,17 +501,17 @@ export class IncrementalDepthStore {
       } else if (marker.confirmed) {
         updatedMarkers.push(markerPoint);
       }
-      if (marker.count >= stabilizationFrames) marker.frozen = true;
     });
 
     return {
       points: this.points,
       addedPoints,
+      updatedPoints,
       addedMarkers,
       updatedMarkers,
       pointCount: this.points.length,
       markerCount: this.confirmedMarkerCount,
-      storageCapacityReached: this.storageCapacityReached,
+      storageCapacityReached: this.storageCapacityReached || this.pointCapacityReached,
     };
   }
 
@@ -378,6 +523,7 @@ export class IncrementalDepthStore {
     return [...this.markers.values()]
       .filter((marker) => marker.confirmed)
       .map((marker) => ({
+        key: marker.key,
         x: marker.x,
         y: marker.y,
         z: marker.z,
@@ -385,6 +531,7 @@ export class IncrementalDepthStore {
         ny: marker.ny,
         nz: marker.nz,
         index: marker.index,
+        revision: marker.revision,
       }));
   }
 
@@ -392,40 +539,45 @@ export class IncrementalDepthStore {
     const cx = Number(cameraPosition.x) || 0;
     const cy = Number(cameraPosition.y) || 0;
     const cz = Number(cameraPosition.z) || 0;
+    const radius = 14;
+    const cellSize = this.settings.visibilityCellSize;
+    const centerX = Math.floor(cx / cellSize);
+    const centerY = Math.floor(cy / cellSize);
+    const centerZ = Math.floor(cz / cellSize);
+    const cellRadius = Math.ceil(radius / cellSize);
     const visible = [];
-    for (const marker of this.markers.values()) {
-      if (!marker.confirmed) continue;
-      const distanceSquared = (marker.x - cx) ** 2 + (marker.y - cy) ** 2 + (marker.z - cz) ** 2;
-      // A room-scale radius keeps far-away history out of the mobile draw
-      // list while the full marker map remains available for revisits.
-      if (distanceSquared <= 14 * 14) visible.push(marker);
+    const seen = new Set();
+    for (let offsetX = -cellRadius; offsetX <= cellRadius; offsetX += 1) {
+      for (let offsetY = -cellRadius; offsetY <= cellRadius; offsetY += 1) {
+        for (let offsetZ = -cellRadius; offsetZ <= cellRadius; offsetZ += 1) {
+          const bucket = this.markerVisibilityCells.get(`${centerX + offsetX}|${centerY + offsetY}|${centerZ + offsetZ}`);
+          if (!bucket) continue;
+          bucket.forEach((marker) => {
+            if (!marker.confirmed || seen.has(marker.key)) return;
+            seen.add(marker.key);
+            const distanceSquared = (marker.x - cx) ** 2 + (marker.y - cy) ** 2 + (marker.z - cz) ** 2;
+            if (distanceSquared <= radius * radius) visible.push({ marker, distanceSquared });
+          });
+        }
+      }
     }
-    if (visible.length <= maximumMarkers) {
-      return visible.map((marker) => ({
-        x: marker.x,
-        y: marker.y,
-        z: marker.z,
-        nx: marker.nx,
-        ny: marker.ny,
-        nz: marker.nz,
-      }));
+    if (visible.length > maximumMarkers) {
+      // Nearest-first selection is deterministic for a stationary camera and
+      // naturally prioritizes nearby detail as the user walks around.
+      visible.sort((a, b) => a.distanceSquared - b.distanceSquared || stableHash(a.marker.key) - stableHash(b.marker.key));
+      visible.length = maximumMarkers;
     }
-    // A rotating stride gives new and old parts of a large room a chance to
-    // render without sorting tens of thousands of markers every depth batch.
-    const stride = Math.ceil(visible.length / maximumMarkers);
-    const offset = this.renderCursor % stride;
-    this.renderCursor += 1;
-    return visible
-      .filter((_, index) => index % stride === offset)
-      .slice(0, maximumMarkers)
-      .map((marker) => ({
-        x: marker.x,
-        y: marker.y,
-        z: marker.z,
-        nx: marker.nx,
-        ny: marker.ny,
-        nz: marker.nz,
-      }));
+    return visible.map(({ marker }) => ({
+      key: marker.key,
+      x: marker.x,
+      y: marker.y,
+      z: marker.z,
+      nx: marker.nx,
+      ny: marker.ny,
+      nz: marker.nz,
+      index: marker.index,
+      revision: marker.revision,
+    }));
   }
 }
 

@@ -276,6 +276,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const xrScanStatsRef = useRef(null);
   const [recordingError, setRecordingError] = useState('');
   const [finishing, setFinishing] = useState(false);
+  const depthStats = scanState?.webXRScanStats;
 
   const resumeCamera = useCallback(() => {
     const video = videoRef.current;
@@ -433,6 +434,8 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
         depthBatchCount: payload?.depthBatchCount || 0,
         depthSampleCount: payload?.depthSampleCount || 0,
         emptyDepthBatchCount: payload?.emptyDepthBatchCount || 0,
+        consecutiveEmptyBatches: payload?.consecutiveEmptyBatches || 0,
+        trackingState: payload?.trackingState || 'tracking',
         storageCapacityReached: Boolean(payload?.storageCapacityReached),
         sampleGrid: payload?.sampleGrid || 0,
         sampleIntervalMs: payload?.sampleIntervalMs || 0,
@@ -610,7 +613,12 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
           </button>
         </div>
       </div>
-      {captureMode === 'depth' && <div className="scan-capture-mode scan-capture-mode-depth" role="status">AR depth scan active</div>}
+      {captureMode === 'depth' && (
+        <div className="scan-capture-mode scan-capture-mode-depth" role="status">
+          <strong>{depthStats?.trackingState === 'waiting' ? 'Finding depth' : 'AR depth scan active'}</strong>
+          {depthStats?.storageCapacityReached && <span>Depth map is full. Press Done to build it.</span>}
+        </div>
+      )}
       {captureMode === 'camera' && <div className="scan-capture-mode scan-capture-mode-fallback" role="status"><strong>Camera capture active</strong><span>AR depth is unavailable on this phone. A 3D room will be built after processing.</span></div>}
       {(cameraState === 'unavailable' || cameraState === 'blocked' || cameraState === 'requesting') && (
         <div className="camera-warning" role="alert">

@@ -19,8 +19,9 @@ Live camera capture requires HTTPS when opened from a phone. For desktop interfa
 Android Chrome + ARCore depth
   -> WebXR immersive-ar session
   -> world-space CPU depth samples
-  -> local PLY point cloud
-  -> in-app first-person point-cloud viewer
+  -> fused world-space PLY upload
+  -> server-side surface meshing (or measured point-cloud fallback)
+  -> in-app first-person room viewer
 
 iPhone/Safari or unsupported browser
   -> full-size JPEG keyframes and optional video
@@ -32,7 +33,7 @@ iPhone/Safari or unsupported browser
 
 Android depth capture requires HTTPS, a WebXR-capable Chrome build, an ARCore-supported device, and Google Play Services for AR. Vercel sends the required `xr-spatial-tracking` Permissions-Policy header from `vercel.json`.
 
-During Android capture, the blue wireframe tiles are measured depth samples grouped into coarse world-space voxels. They are not CSS overlays: their positions are retained in the AR reference space, so revisiting a scanned wall or object reuses the same anchored tile. iOS does not show these live tiles because camera-only Safari cannot provide a reliable world anchor; its persistent result is the reconstructed room after processing.
+During Android capture, the blue surface marks are measured depth samples fused into world-space surfels. They are not CSS overlays: their positions and surface directions are retained in the AR reference space, so revisiting a scanned wall or object reuses the same anchored coverage. iOS does not show these live marks because camera-only Safari cannot provide a reliable world anchor; its persistent result is the reconstructed room after processing.
 
 ## Reconstruction architecture
 

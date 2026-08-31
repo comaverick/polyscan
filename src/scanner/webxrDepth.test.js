@@ -105,7 +105,7 @@ test('stable scan markers keep one world-space position per coarse voxel', () =>
   expect(markers[0]).toEqual({ x: 1, y: 2, z: 3 });
 });
 
-test('incremental depth store confirms and then freezes stable markers', () => {
+test('incremental depth store confirms and preserves stable markers', () => {
   const store = new IncrementalDepthStore({
     markerConfirmationFrames: 2,
     markerStabilizationFrames: 3,
@@ -120,7 +120,9 @@ test('incremental depth store confirms and then freezes stable markers', () => {
   expect(third.updatedMarkers).toHaveLength(1);
   const fourth = store.addPoints([{ x: 1.1, y: 2.1, z: 3.1 }]);
   expect(fourth.updatedMarkers).toHaveLength(0);
-  expect(store.getMarkers()[0]).toMatchObject({ x: 1.0133333333333334, y: 2.013333333333333, z: 3.013333333333333 });
+  expect(store.getMarkers()[0].x).toBeCloseTo(1.0133333333333334, 10);
+  expect(store.getMarkers()[0].y).toBeCloseTo(2.013333333333333, 10);
+  expect(store.getMarkers()[0].z).toBeCloseTo(3.013333333333333, 10);
 });
 
 test('storage continues past the live render marker budget', () => {
@@ -135,5 +137,34 @@ test('storage continues past the live render marker budget', () => {
     { x: 1, y: 0, z: 0 },
   ]);
   expect(result.markerCount).toBe(2);
-  expect(store.getVisibleMarkers({ x: 0, y: 0, z: 0 }, 1)).toHaveLength(1);
+  const firstVisible = store.getVisibleMarkers({ x: 0, y: 0, z: 0 }, 1);
+  const secondVisible = store.getVisibleMarkers({ x: 0, y: 0, z: 0 }, 1);
+  expect(firstVisible).toHaveLength(1);
+  expect(secondVisible).toEqual(firstVisible);
+});
+
+test('fuses repeated readings instead of preserving a noisy first sample', () => {
+  const store = new IncrementalDepthStore({ markerConfirmationFrames: 1 });
+  store.addPoints([{ x: 0, y: 0, z: 2, nx: 0, ny: 0, nz: 1 }]);
+  const result = store.addPoints([{ x: 0.02, y: 0, z: 2.01, nx: 0, ny: 0, nz: 1 }]);
+  expect(result.pointCount).toBe(1);
+  expect(store.getPoints()[0].x).toBeCloseTo(0.01, 4);
+  expect(store.getPoints()[0].z).toBeCloseTo(2.005, 4);
+});
+
+test('does not bridge a depth discontinuity when estimating normals', () => {
+  const projectionMatrix = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+  const frame = {
+    getDepthInformation: () => ({
+      getDepthInMeters: (x) => x < 0.5 ? 2 : 4,
+    }),
+  };
+  const pose = { views: [{ projectionMatrix, transform: { matrix: projectionMatrix } }] };
+  const points = sampleDepthPointCloud(frame, pose, { sampleGrid: 4 });
+  expect(points.some((point) => !Number.isFinite(point.nx))).toBe(true);
 });
