@@ -19,6 +19,12 @@ const DEFAULT_OPTIONS = Object.freeze({
   pointUpdateMaxDistance: 0.08,
   markerMatchCellSize: 0.2,
   visibilityCellSize: 2,
+  // Surface triangles are built from neighboring samples in the fixed depth
+  // grid. Keep this cap high enough for a room while preventing an accidental
+  // runaway upload on a noisy device.
+  maximumFaces: 500000,
+  meshMaxEdgeLength: 0.65,
+  meshNormalThreshold: 0.35,
 });
 
 function isFinitePoint(point) {
@@ -157,7 +163,14 @@ export function sampleDepthSurface(frame, pose, options = {}) {
   const settings = { ...DEFAULT_OPTIONS, ...options };
   const points = [];
   const view = pose?.views?.[0];
-  const emptySurface = { points, gridPoints: [], gridSide: 0, step: 0, cameraPosition: { x: 0, y: 0, z: 0 } };
+  const emptySurface = {
+    points,
+    gridPoints: [],
+    gridPointIndices: [],
+    gridSide: 0,
+    step: 0,
+    cameraPosition: { x: 0, y: 0, z: 0 },
+  };
   if (!frame || !view || typeof frame.getDepthInformation !== 'function') return emptySurface;
   let depthInfo;
   try {
@@ -178,6 +191,7 @@ export function sampleDepthSurface(frame, pose, options = {}) {
   const rowSize = step + 1;
   const depths = new Float32Array(rowSize * rowSize);
   const worldPoints = new Array(rowSize * rowSize);
+  const gridPointIndices = new Array(rowSize * rowSize).fill(-1);
   const phase = ((Math.trunc(settings.samplePhase || 0) % 4) + 4) % 4;
   const xOffset = phase === 1 || phase === 3 ? 0.45 : 0;
   const yOffset = phase === 2 || phase === 3 ? 0.45 : 0;
@@ -259,6 +273,7 @@ export function sampleDepthSurface(frame, pose, options = {}) {
           }
         }
       }
+      gridPointIndices[index] = points.length;
       points.push({
         ...worldPoint,
         ...(normal ? { nx: normal.x, ny: normal.y, nz: normal.z } : {}),
@@ -271,6 +286,7 @@ export function sampleDepthSurface(frame, pose, options = {}) {
   return {
     points,
     gridPoints: worldPoints,
+    gridPointIndices,
     gridSide: rowSize,
     step,
     cameraPosition,
@@ -312,6 +328,8 @@ export class IncrementalDepthStore {
     this.markerMatchCells = new Map();
     this.markerVisibilityCells = new Map();
     this.points = [];
+    this.faces = [];
+    this.faceKeys = new Set();
     this.confirmedMarkerCount = 0;
     this.storageCapacityReached = false;
     this.pointCapacityReached = false;
@@ -463,6 +481,8 @@ export class IncrementalDepthStore {
     this.markerMatchCells.clear();
     this.markerVisibilityCells.clear();
     this.points = [];
+    this.faces = [];
+    this.faceKeys.clear();
     this.confirmedMarkerCount = 0;
     this.storageCapacityReached = false;
     this.pointCapacityReached = false;
@@ -508,11 +528,12 @@ export class IncrementalDepthStore {
     const updatedPoints = [];
     const addedMarkers = [];
     const updatedMarkers = [];
+    const pointIndices = new Array(nextPoints.length).fill(-1);
     const seenMarkers = new Set();
     const confirmationFrames = Math.max(1, Math.round(this.settings.markerConfirmationFrames));
     this.batchNumber += 1;
 
-    nextPoints.forEach((point) => {
+    nextPoints.forEach((point, inputIndex) => {
       if (!isFinitePoint(point)) return;
 
       const existingPoint = this.findNearest(
@@ -523,6 +544,7 @@ export class IncrementalDepthStore {
         0.25,
       );
       if (existingPoint) {
+        pointIndices[inputIndex] = existingPoint.index;
         const currentPoint = this.points[existingPoint.index];
         const pointDistance = Math.hypot(
           currentPoint.x - point.x,
@@ -548,6 +570,7 @@ export class IncrementalDepthStore {
           b: point.b ?? 255,
         };
         const index = this.points.length;
+        pointIndices[inputIndex] = index;
         const pointKey = voxelKey(stablePoint, this.settings.voxelSize);
         this.voxels.set(pointKey, index);
         this.points.push(stablePoint);
@@ -683,14 +706,87 @@ export class IncrementalDepthStore {
       updatedPoints,
       addedMarkers,
       updatedMarkers,
+      pointIndices,
       pointCount: this.points.length,
       markerCount: this.confirmedMarkerCount,
       storageCapacityReached: this.storageCapacityReached || this.pointCapacityReached,
     };
   }
 
+  /**
+   * Adds one sampled depth grid and closes each continuous quad with two
+   * triangles. The point indices come from the incremental store, so revisits
+   * update the same vertices instead of creating a second drifting surface.
+   */
+  addSurface(surface = {}) {
+    const points = Array.isArray(surface?.points) ? surface.points : [];
+    const result = this.addPoints(points);
+    const gridPoints = Array.isArray(surface?.gridPoints) ? surface.gridPoints : [];
+    const gridPointIndices = Array.isArray(surface?.gridPointIndices) ? surface.gridPointIndices : [];
+    const side = Math.max(0, Math.trunc(Number(surface?.gridSide || 0)));
+    const maxEdge = Math.max(0.05, Number(this.settings.meshMaxEdgeLength) || 0.42);
+    const normalThreshold = Number(this.settings.meshNormalThreshold);
+    let facesAdded = 0;
+    if (side >= 2 && gridPointIndices.length >= side * side) {
+      const addFace = (a, b, c) => {
+        if (this.faces.length >= this.settings.maximumFaces) return;
+        if (![a, b, c].every((index) => Number.isInteger(index) && index >= 0 && index < this.points.length)) return;
+        if (a === b || b === c || a === c) return;
+        const first = this.points[a];
+        const second = this.points[b];
+        const third = this.points[c];
+        const edgeAB = Math.hypot(first.x - second.x, first.y - second.y, first.z - second.z);
+        const edgeAC = Math.hypot(first.x - third.x, first.y - third.y, first.z - third.z);
+        const edgeBC = Math.hypot(second.x - third.x, second.y - third.y, second.z - third.z);
+        if (![edgeAB, edgeAC, edgeBC].every((edge) => Number.isFinite(edge) && edge <= maxEdge)) return;
+        const normals = [first, second, third].filter((point) => (
+          Number.isFinite(point.nx) && Number.isFinite(point.ny) && Number.isFinite(point.nz)
+          && Math.hypot(point.nx, point.ny, point.nz) > 0.5
+        ));
+        if (normals.length === 3 && Number.isFinite(normalThreshold)) {
+          const dotAB = first.nx * second.nx + first.ny * second.ny + first.nz * second.nz;
+          const dotAC = first.nx * third.nx + first.ny * third.ny + first.nz * third.nz;
+          const dotBC = second.nx * third.nx + second.ny * third.ny + second.nz * third.nz;
+          if (Math.min(dotAB, dotAC, dotBC) < normalThreshold) return;
+        }
+        const key = [a, b, c].sort((left, right) => left - right).join('|');
+        if (this.faceKeys.has(key)) return;
+        this.faceKeys.add(key);
+        this.faces.push([a, b, c]);
+        facesAdded += 1;
+      };
+
+      for (let row = 0; row < side - 1; row += 1) {
+        for (let column = 0; column < side - 1; column += 1) {
+          const topLeft = row * side + column;
+          const topRight = topLeft + 1;
+          const bottomLeft = topLeft + side;
+          const bottomRight = bottomLeft + 1;
+          const corners = [topLeft, topRight, bottomLeft, bottomRight];
+          if (!corners.every((index) => gridPoints[index] && Number.isFinite(gridPoints[index].x))) continue;
+          const a = gridPointIndices[topLeft];
+          const b = gridPointIndices[topRight];
+          const c = gridPointIndices[bottomLeft];
+          const d = gridPointIndices[bottomRight];
+          addFace(a, c, b);
+          addFace(b, c, d);
+        }
+      }
+    }
+    return {
+      ...result,
+      faces: this.faces,
+      facesAdded,
+      faceCount: this.faces.length,
+    };
+  }
+
   getPoints() {
     return this.points;
+  }
+
+  getFaces() {
+    return this.faces;
   }
 
   getMarkers() {
@@ -775,8 +871,25 @@ export function getStableScanMarkers(points = [], options = {}) {
   return [...markers.values()].slice(0, settings.maximumMarkers);
 }
 
-export function serializePointCloudToPly(points = []) {
-  const validPoints = points.filter((point) => Number.isFinite(point?.x) && Number.isFinite(point?.y) && Number.isFinite(point?.z));
+export function serializePointCloudToPly(points = [], options = {}) {
+  const validPoints = [];
+  const pointIndexMap = new Map();
+  points.forEach((point, index) => {
+    if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y) || !Number.isFinite(point?.z)) return;
+    pointIndexMap.set(index, validPoints.length);
+    validPoints.push(point);
+  });
+  const faces = [];
+  const faceKeys = new Set();
+  (Array.isArray(options?.faces) ? options.faces : []).forEach((face) => {
+    if (!Array.isArray(face) || face.length < 3) return;
+    const indices = face.slice(0, 3).map((index) => pointIndexMap.get(index));
+    if (!indices.every((index) => Number.isInteger(index)) || new Set(indices).size < 3) return;
+    const key = [...indices].sort((left, right) => left - right).join('|');
+    if (faceKeys.has(key)) return;
+    faceKeys.add(key);
+    faces.push(indices);
+  });
   const hasNormals = validPoints.some((point) => Number.isFinite(point?.nx) && Number.isFinite(point?.ny) && Number.isFinite(point?.nz));
   const header = [
     'ply',
@@ -789,6 +902,7 @@ export function serializePointCloudToPly(points = []) {
     'property uchar green',
     'property uchar blue',
     ...(hasNormals ? ['property float nx', 'property float ny', 'property float nz'] : []),
+    ...(faces.length ? [`element face ${faces.length}`, 'property list uchar int vertex_indices'] : []),
     'end_header',
   ].join('\n');
   const rows = validPoints.map((point) => {
@@ -800,7 +914,8 @@ export function serializePointCloudToPly(points = []) {
     );
     return values.join(' ');
   });
-  return `${header}\n${rows.join('\n')}\n`;
+  const faceRows = faces.map((face) => `3 ${face.join(' ')}`);
+  return `${header}\n${rows.join('\n')}${faceRows.length ? `\n${faceRows.join('\n')}` : ''}\n`;
 }
 
 export { DEFAULT_OPTIONS as WEBXR_DEPTH_OPTIONS };

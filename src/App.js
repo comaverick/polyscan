@@ -88,6 +88,7 @@ const createEmptyScanState = () => ({
   meaningfulCameraMotion: false,
   stableFeatures: [],
   webXRPointCloud: [],
+  webXRMeshFaces: [],
   webXRScanStats: null,
   lastFrame: null,
   lastViewpoint: null,
@@ -273,6 +274,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
   const recordingStartedAtRef = useRef(0);
   const xrPublishAtRef = useRef(0);
   const xrPointCloudRef = useRef([]);
+  const xrMeshFacesRef = useRef([]);
   const xrScanStatsRef = useRef(null);
   const [recordingError, setRecordingError] = useState('');
   const [finishing, setFinishing] = useState(false);
@@ -327,6 +329,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       scanRef.current = {
         ...scanState,
         webXRPointCloud: xrPointCloudRef.current,
+        webXRMeshFaces: xrMeshFacesRef.current,
         webXRScanStats: xrScanStatsRef.current,
       };
     } else {
@@ -424,11 +427,14 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
 
   const publishXrPointCloud = useCallback((payload) => {
     const points = Array.isArray(payload) ? payload : payload?.points || [];
+    const faces = Array.isArray(payload) ? [] : payload?.faces || [];
     const nextState = {
       ...scanRef.current,
       webXRPointCloud: points,
+      webXRMeshFaces: faces,
       webXRScanStats: Array.isArray(payload) ? null : {
         pointCount: payload?.pointCount || points.length,
+        faceCount: payload?.faceCount || faces.length,
         markerCount: payload?.markerCount || 0,
         depthFrameCount: payload?.depthFrameCount || 0,
         depthBatchCount: payload?.depthBatchCount || 0,
@@ -442,6 +448,7 @@ function ScanScreen({ scanState, paused, onPause, onDone, onScanStateChange, cam
       },
     };
     xrPointCloudRef.current = points;
+    xrMeshFacesRef.current = faces;
     xrScanStatsRef.current = nextState.webXRScanStats;
     scanRef.current = nextState;
     // The renderer owns the live point cloud. React only needs an occasional
@@ -638,6 +645,9 @@ function ReviewScreen({ selectedKeyframes, capture, scanState, processingAvailab
   const hasVideo = Boolean(capture?.blob);
   const imageCount = countCapturedKeyframes(selectedKeyframes);
   const depthPointCount = Array.isArray(scanState?.webXRPointCloud) ? scanState.webXRPointCloud.length : 0;
+  const depthFaceCount = Array.isArray(scanState?.webXRMeshFaces)
+    ? scanState.webXRMeshFaces.length
+    : Number(scanState?.webXRScanStats?.faceCount || 0);
   const hasDepth = depthPointCount >= 100;
   const hasCapture = hasVideo || imageCount >= 8 || hasDepth;
   const duration = capture?.durationMs ? `${Math.max(1, Math.round(capture.durationMs / 1000))}s` : hasVideo ? 'Video' : imageCount ? 'Images' : 'None';
@@ -652,11 +662,12 @@ function ReviewScreen({ selectedKeyframes, capture, scanState, processingAvailab
         <div className="review-copy-block">
           <p className="eyebrow">Scan complete</p>
           <h1>Review your<br /><span>room capture.</span></h1>
-          <p>{hasDepth ? 'Your measured depth map is ready to turn into a room surface. The reconstruction service will close it into a first-person model.' : hasCapture ? 'Your overlapping camera views are ready for server-side photogrammetry and a real room mesh.' : 'Scan more overlapping views before PolyScan can reconstruct the room.'}</p>
+          <p>{hasDepth ? (depthFaceCount > 0 ? 'Your measured room surface is ready. The stable depth triangles will open directly as a first-person model.' : 'Your measured depth points are ready. Scan a little longer across connected surfaces to create a room surface.') : hasCapture ? 'Your overlapping camera views are ready for server-side photogrammetry and a real room mesh.' : 'Scan more overlapping views before PolyScan can reconstruct the room.'}</p>
           <div className="review-stats" aria-label="Capture summary">
             <span><strong>{selectedKeyframes.length || 0}</strong> viewpoints</span>
             <span><strong>{imageCount}</strong> full-size images</span>
             {hasDepth && <span><strong>{depthPointCount.toLocaleString()}</strong> depth points</span>}
+            {hasDepth && depthFaceCount > 0 && <span><strong>{depthFaceCount.toLocaleString()}</strong> surface triangles</span>}
             <span><strong>{duration}</strong> capture</span>
           </div>
           <div className="review-actions">
@@ -1001,6 +1012,7 @@ function App() {
     setScreen('processing');
     const imageCount = countCapturedKeyframes(selectedKeyframes);
     const pointCloud = Array.isArray(scanState.webXRPointCloud) ? scanState.webXRPointCloud : [];
+    const faces = Array.isArray(scanState.webXRMeshFaces) ? scanState.webXRMeshFaces : [];
     const hasDepth = pointCloud.length >= 100;
     if (!capture?.blob && imageCount < 8 && !hasDepth) {
       setBuildState({ status: 'error', progress: 0, jobId: null, error: 'Scan more of the room before building. A depth scan needs at least 100 measured points, or eight full-size viewpoints.', manifest });
@@ -1018,6 +1030,7 @@ function App() {
       capture,
       keyframes: selectedKeyframes,
       pointCloud,
+      faces,
       manifest,
       signal: controller.signal,
       onProgress: (progress) => setBuildState((current) => ({ ...current, status: 'uploading', progress })),

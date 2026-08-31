@@ -287,11 +287,11 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
             const processingStartedAt = performance.now();
             const surface = pose
               ? sampleDepthSurface(frame, pose, { sampleGrid, samplePhase: 0 })
-              : { points: [], gridPoints: [], gridSide: 0 };
+              : { points: [], gridPoints: [], gridPointIndices: [], gridSide: 0 };
             const freshPoints = surface.points;
             const recoveringTracking = trackingResetGraceBatches > 0;
             if (recoveringTracking) trackingResetGraceBatches -= 1;
-            const result = scanStore.addPoints(recoveringTracking ? [] : freshPoints);
+            const result = scanStore.addSurface(recoveringTracking ? {} : surface);
             depthFrameCount += 1;
             if (freshPoints.length && !recoveringTracking) {
               updateOcclusion(surface);
@@ -316,7 +316,9 @@ export default function WebXRDepthScanner({ session, onPointCloud, onSessionErro
               lastPublishedAt = time;
               onPointCloud({
                 points: result.points,
+                faces: result.faces,
                 pointCount: result.pointCount,
+                faceCount: result.faceCount,
                 markerCount: result.markerCount,
                 depthFrameCount,
                 depthBatchCount,

@@ -66,7 +66,7 @@ function uploadWithProgress(url, blob, onProgress, signal) {
   });
 }
 
-export function buildCaptureAssets({ capture, keyframes = [], pointCloud = [] } = {}) {
+export function buildCaptureAssets({ capture, keyframes = [], pointCloud = [], faces = [] } = {}) {
   const assets = [];
   if (capture?.blob) {
     const isWebm = String(capture.blob.type || '').includes('webm');
@@ -91,11 +91,12 @@ export function buildCaptureAssets({ capture, keyframes = [], pointCloud = [] } 
     });
   });
   if (pointCloud.length >= 100) {
-    const ply = serializePointCloudToPly(pointCloud);
+    const hasMesh = Array.isArray(faces) && faces.length > 0;
+    const ply = serializePointCloudToPly(pointCloud, { faces: hasMesh ? faces : [] });
     const blob = new Blob([ply], { type: 'application/octet-stream' });
     assets.push({
       id: 'depth-pointcloud',
-      kind: 'pointcloud',
+      kind: hasMesh ? 'mesh' : 'pointcloud',
       filename: 'depth-scan.ply',
       contentType: 'application/octet-stream',
       blob,
@@ -135,9 +136,9 @@ async function uploadAssets(uploadSession, assets, onProgress, signal) {
   await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
 }
 
-export async function submitCapture({ capture, keyframes = [], pointCloud = [], manifest, onProgress = () => {}, signal } = {}) {
+export async function submitCapture({ capture, keyframes = [], pointCloud = [], faces = [], manifest, onProgress = () => {}, signal } = {}) {
   if (!endpoint) throw new Error('No reconstruction endpoint is configured.');
-  const assets = buildCaptureAssets({ capture, keyframes, pointCloud });
+  const assets = buildCaptureAssets({ capture, keyframes, pointCloud, faces });
   if (!assets.length) throw new Error('There are no room images, video, or measured depth points to upload.');
 
   const upload = await requestJson(`${endpoint}/uploads`, {
@@ -184,6 +185,7 @@ export function createCaptureManifest(scanState = {}, keyframes = []) {
     viewpointCount: keyframes.length,
     imageCount: keyframes.filter((frame) => Boolean(frame.capture?.blob)).length,
     depthPointCount: Array.isArray(scanState.webXRPointCloud) ? scanState.webXRPointCloud.length : 0,
+    depthFaceCount: Array.isArray(scanState.webXRMeshFaces) ? scanState.webXRMeshFaces.length : 0,
     depthMarkerCount: Number(scanState.webXRScanStats?.markerCount || 0),
     coverage: (scanState.directionalCoverage || []).map((cell) => ({
       id: cell.id,

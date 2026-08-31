@@ -12,6 +12,78 @@ function normalizeFormat(asset) {
   return 'glb';
 }
 
+function percentile(values, fraction) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * fraction)));
+  return sorted[index];
+}
+
+/**
+ * Depth fallbacks can contain a small number of invalid samples many metres
+ * away from the room. Those points create the starfield view and also make
+ * the default camera spawn outside the scan. Keep dense, spatially connected
+ * samples while preserving the original mesh path untouched.
+ */
+function filterPointCloudGeometry(THREE, geometry) {
+  const position = geometry.getAttribute('position');
+  if (!position || position.count < 20) return geometry;
+  const xs = [];
+  const ys = [];
+  const zs = [];
+  for (let index = 0; index < position.count; index += 1) {
+    const x = position.getX(index);
+    const y = position.getY(index);
+    const z = position.getZ(index);
+    if (![x, y, z].every(Number.isFinite)) continue;
+    xs.push(x); ys.push(y); zs.push(z);
+  }
+  if (xs.length < 20) return geometry;
+  const min = [percentile(xs, 0.005), percentile(ys, 0.005), percentile(zs, 0.005)];
+  const max = [percentile(xs, 0.995), percentile(ys, 0.995), percentile(zs, 0.995)];
+  const span = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+  const voxelSize = Math.max(0.12, Math.min(0.28, span / 90 || 0.16));
+  const cellCounts = new Map();
+  const cellFor = (x, y, z) => `${Math.floor((x - min[0]) / voxelSize)}|${Math.floor((y - min[1]) / voxelSize)}|${Math.floor((z - min[2]) / voxelSize)}`;
+  for (let index = 0; index < position.count; index += 1) {
+    const x = position.getX(index);
+    const y = position.getY(index);
+    const z = position.getZ(index);
+    if (x < min[0] || x > max[0] || y < min[1] || y > max[1] || z < min[2] || z > max[2]) continue;
+    const key = cellFor(x, y, z);
+    cellCounts.set(key, (cellCounts.get(key) || 0) + 1);
+  }
+  const kept = [];
+  for (let index = 0; index < position.count; index += 1) {
+    const x = position.getX(index);
+    const y = position.getY(index);
+    const z = position.getZ(index);
+    if (x < min[0] || x > max[0] || y < min[1] || y > max[1] || z < min[2] || z > max[2]) continue;
+    if ((cellCounts.get(cellFor(x, y, z)) || 0) < 2) continue;
+    kept.push(index);
+  }
+  if (kept.length < Math.max(20, position.count * 0.12) || kept.length >= position.count * 0.995) return geometry;
+  const filtered = new THREE.BufferGeometry();
+  const positions = new Float32Array(kept.length * 3);
+  const colors = geometry.getAttribute('color') ? new Float32Array(kept.length * 3) : null;
+  kept.forEach((sourceIndex, targetIndex) => {
+    positions[targetIndex * 3] = position.getX(sourceIndex);
+    positions[targetIndex * 3 + 1] = position.getY(sourceIndex);
+    positions[targetIndex * 3 + 2] = position.getZ(sourceIndex);
+    if (colors) {
+      const color = geometry.getAttribute('color');
+      colors[targetIndex * 3] = color.getX(sourceIndex);
+      colors[targetIndex * 3 + 1] = color.getY(sourceIndex);
+      colors[targetIndex * 3 + 2] = color.getZ(sourceIndex);
+    }
+  });
+  filtered.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  if (colors) filtered.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  filtered.computeBoundingBox();
+  filtered.computeBoundingSphere();
+  return filtered;
+}
+
 export default function RoomModelViewer({ asset, spawn }) {
   const hostRef = useRef(null);
   const movementRef = useRef({ forward: 0, right: 0 });
@@ -60,11 +132,16 @@ export default function RoomModelViewer({ asset, spawn }) {
         const format = normalizeFormat(asset);
         let model;
         if (format === 'ply') {
-          const geometry = await new PLYLoader().loadAsync(asset.url);
+          let geometry = await new PLYLoader().loadAsync(asset.url);
           geometry.computeBoundingBox();
           if (String(asset.kind || '').toLowerCase() === 'pointcloud') {
+            const filteredGeometry = filterPointCloudGeometry(THREE, geometry);
+            if (filteredGeometry !== geometry) {
+              geometry.dispose();
+              geometry = filteredGeometry;
+            }
             model = new THREE.Points(geometry, new THREE.PointsMaterial({
-              size: Number(asset.pointSize || 0.018),
+              size: Number(asset.pointSize || 0.026),
               vertexColors: Boolean(geometry.getAttribute('color')),
               color: geometry.getAttribute('color') ? 0xffffff : 0x9ee7ff,
               sizeAttenuation: true,
@@ -115,14 +192,16 @@ export default function RoomModelViewer({ asset, spawn }) {
           Number.isFinite(spawn?.z) ? spawn.z : center.z,
         );
         camera.position.copy(startPosition);
-        let yaw = Number(spawn?.yaw || 0);
-        let pitch = Number(spawn?.pitch || 0);
+        const defaultYaw = Math.atan2(center.x - startPosition.x, -(center.z - startPosition.z));
+        const defaultPitch = Math.max(-0.45, Math.min(0.45, Math.atan2(center.y - startPosition.y, Math.max(0.1, Math.hypot(center.x - startPosition.x, center.z - startPosition.z)))));
+        let yaw = Number.isFinite(spawn?.yaw) ? Number(spawn.yaw) : defaultYaw;
+        let pitch = Number.isFinite(spawn?.pitch) ? Number(spawn.pitch) : defaultPitch;
         camera.rotation.set(pitch, yaw, 0);
 
         resetRef.current = () => {
           camera.position.copy(startPosition);
-          yaw = Number(spawn?.yaw || 0);
-          pitch = Number(spawn?.pitch || 0);
+          yaw = Number.isFinite(spawn?.yaw) ? Number(spawn.yaw) : defaultYaw;
+          pitch = Number.isFinite(spawn?.pitch) ? Number(spawn.pitch) : defaultPitch;
           camera.rotation.set(pitch, yaw, 0);
         };
 

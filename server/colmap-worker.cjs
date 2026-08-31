@@ -83,11 +83,19 @@ async function prepareImages({ captureDirectory, assets, workspace, onProgress }
 }
 
 async function runDepthPipeline({ captureDirectory, assets, workspace, onProgress = () => {} }) {
+  const [measuredMesh] = existingAssets(captureDirectory, assets, 'mesh');
   const [pointCloud] = existingAssets(captureDirectory, assets, 'pointcloud');
-  if (!pointCloud) throw new Error('The depth scan did not include a point cloud asset.');
-  if (!hasUsablePointCloud(pointCloud.path)) throw new Error('The depth scan point cloud is empty.');
+  if (!measuredMesh && !pointCloud) throw new Error('The depth scan did not include a point cloud or mesh asset.');
   fs.mkdirSync(workspace, { recursive: true });
   const modelPath = path.join(workspace, 'room.ply');
+  if (measuredMesh && hasUsableMesh(measuredMesh.path)) {
+    fs.copyFileSync(measuredMesh.path, modelPath);
+    onProgress(100, 'Measured depth mesh ready');
+    return { modelPath, imageCount: 0, format: 'ply', kind: 'mesh', coordinateSystem: 'world' };
+  }
+  if (!pointCloud || !hasUsablePointCloud(pointCloud.path)) {
+    throw new Error('The depth scan mesh and point cloud are empty. Scan more surfaces and try again.');
+  }
   const colmap = process.env.COLMAP_PATH || 'colmap';
   onProgress(25, 'Preparing the measured depth surface');
   try {
@@ -112,7 +120,7 @@ async function runDepthPipeline({ captureDirectory, assets, workspace, onProgres
 }
 
 async function runColmapPipeline({ captureDirectory, assets, workspace, onProgress = () => {} }) {
-  if (existingAssets(captureDirectory, assets, 'pointcloud').length) {
+  if (existingAssets(captureDirectory, assets, 'mesh').length || existingAssets(captureDirectory, assets, 'pointcloud').length) {
     return runDepthPipeline({ captureDirectory, assets, workspace, onProgress });
   }
   const colmap = process.env.COLMAP_PATH || 'colmap';

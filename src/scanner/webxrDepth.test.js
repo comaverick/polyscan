@@ -3,6 +3,7 @@ import {
   mergePointCloud,
   getStableScanMarkers,
   requestDepthSession,
+  sampleDepthSurface,
   sampleDepthPointCloud,
   serializePointCloudToPly,
 } from './webxrDepth';
@@ -34,6 +35,24 @@ test('converts normalized depth samples into world-space points', () => {
   const points = sampleDepthPointCloud(frame, pose, { sampleGrid: 4 });
   expect(points).toHaveLength(25);
   expect(points[0]).toMatchObject({ x: -2, y: 2, z: -2, r: 118, g: 211, b: 255 });
+});
+
+test('keeps depth-grid indices aligned with sampled points', () => {
+  const identity = [
+    1, 0, 0, 0,
+    0, 1, 0, 0,
+    0, 0, 1, 0,
+    0, 0, 0, 1,
+  ];
+  const surface = sampleDepthSurface(
+    { getDepthInformation: () => ({ getDepthInMeters: () => 2 }) },
+    { views: [{ projectionMatrix: identity, transform: { matrix: identity } }] },
+    { sampleGrid: 4 },
+  );
+  expect(surface.gridSide).toBe(5);
+  expect(surface.gridPointIndices).toHaveLength(25);
+  expect(surface.gridPointIndices.every((index) => index >= 0)).toBe(true);
+  expect(new Set(surface.gridPointIndices).size).toBe(surface.points.length);
 });
 
 test('uses the forward XR view transform to place depth points in reference space', () => {
@@ -95,6 +114,19 @@ test('voxel merges repeated depth samples and serializes a valid PLY', () => {
   expect(ply).toContain('end_header');
 });
 
+test('serializes stable depth-grid faces into the PLY mesh', () => {
+  const points = [
+    { x: 0, y: 0, z: 0 },
+    { x: 1, y: 0, z: 0 },
+    { x: 0, y: 1, z: 0 },
+    { x: 1, y: 1, z: 0 },
+  ];
+  const ply = serializePointCloudToPly(points, { faces: [[0, 2, 1], [1, 2, 3]] });
+  expect(ply).toContain('element face 2');
+  expect(ply).toContain('property list uchar int vertex_indices');
+  expect(ply).toContain('3 0 2 1');
+});
+
 test('stable scan markers keep one world-space position per coarse voxel', () => {
   const markers = getStableScanMarkers([
     { x: 1, y: 2, z: 3 },
@@ -123,6 +155,34 @@ test('incremental depth store confirms and preserves stable markers', () => {
   expect(store.getMarkers()[0].x).toBeCloseTo(1.0133333333333334, 10);
   expect(store.getMarkers()[0].y).toBeCloseTo(2.013333333333333, 10);
   expect(store.getMarkers()[0].z).toBeCloseTo(3.013333333333333, 10);
+});
+
+test('incremental depth store closes a continuous grid without duplicate faces', () => {
+  const store = new IncrementalDepthStore({
+    markerConfirmationFrames: 1,
+    meshMaxEdgeLength: 2,
+  });
+  const surface = {
+    points: [
+      { x: 0, y: 0, z: 0 },
+      { x: 1, y: 0, z: 0 },
+      { x: 0, y: 1, z: 0 },
+      { x: 1, y: 1, z: 0 },
+    ],
+    gridPoints: [
+      { x: 0, y: 0, z: 0 },
+      { x: 1, y: 0, z: 0 },
+      { x: 0, y: 1, z: 0 },
+      { x: 1, y: 1, z: 0 },
+    ],
+    gridPointIndices: [0, 1, 2, 3],
+    gridSide: 2,
+  };
+  const first = store.addSurface(surface);
+  const second = store.addSurface(surface);
+  expect(first.faceCount).toBe(2);
+  expect(second.facesAdded).toBe(0);
+  expect(store.getFaces()).toEqual([[0, 2, 1], [1, 2, 3]]);
 });
 
 test('storage continues past the live render marker budget', () => {

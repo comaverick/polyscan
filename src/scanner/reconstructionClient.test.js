@@ -21,9 +21,16 @@ test('builds a depth point-cloud asset for Android reconstruction', () => {
   expect(serializePointCloudToPly(pointCloud)).toContain('property float nx');
 });
 
+test('builds a measured mesh asset when stable depth faces are available', () => {
+  const pointCloud = Array.from({ length: 100 }, (_, index) => ({ x: index * 0.01, y: 0, z: 0 }));
+  const assets = buildCaptureAssets({ pointCloud, faces: [[0, 2, 1]] });
+  expect(assets).toHaveLength(1);
+  expect(assets[0]).toMatchObject({ kind: 'mesh', filename: 'depth-scan.ply' });
+});
+
 test('marks the manifest as a photogrammetry image capture', () => {
   const photo = new Blob(['photo'], { type: 'image/jpeg' });
-  const manifest = createCaptureManifest({ frameCount: 32, webXRPointCloud: [{ x: 0, y: 0, z: 0 }] }, [{
+  const manifest = createCaptureManifest({ frameCount: 32, webXRPointCloud: [{ x: 0, y: 0, z: 0 }], webXRMeshFaces: [[0, 0, 0]] }, [{
     id: 'frame-one',
     timestamp: 12,
     capture: { blob: photo, width: 1200, height: 1600 },
@@ -31,5 +38,6 @@ test('marks the manifest as a photogrammetry image capture', () => {
   expect(manifest.version).toBe(2);
   expect(manifest.imageCount).toBe(1);
   expect(manifest.depthPointCount).toBe(1);
+  expect(manifest.depthFaceCount).toBe(1);
   expect(manifest.keyframes[0].filename).toBe('keyframe-0001.jpg');
 });
